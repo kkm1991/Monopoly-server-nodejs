@@ -1,0 +1,71 @@
+# Monopoly Server Game Flow
+
+## 1. Game Initialization
+- **Connection**: Server sends `update-rooms` with current room list.
+- **Create Room**: Client emits `create-room` -> Server emits `room-created` & `update-rooms`.
+- **Join Room**: Client emits `join-room` -> Server emits `room-joined` & `update-rooms`.
+- **Start Game**: Client emits `start-game` -> Server initializes player positions/money -> Emits `update-rooms` with status "in-game".
+
+## 2. Main Game Loop (Player Turn)
+
+### A. Player Movement
+1. **Client**: Emits `player-move`. from the diceRoller component.
+2. **Server**:
+    - Rolls dice.
+    - Emits `dice-rolled`.
+    - Calculates new position.
+    - **Go To Jail Check**: If landed on "Go To Jail" (30) -> Move to Jail (10), set `sentToJail = true`.
+    - **Pass Go Check**: If passed Go (0) and not sent to Jail -> Add $200, emit `collect-money`.
+    - **Tax Check**: If on Income Tax (4) or Luxury Tax (38) -> Deduct $200.
+
+### B. Special Tile Handling (Chance / Community Chest)
+If player lands on Chance (7, 22, 36) or Community Chest (2, 17, 33):
+1. **Server**:
+    - Emits `before-draw` (type: "chance" | "community"). အရင်ဆုံး player ရဲ့ card ဆွဲတဲ့ action ကိုစောင့်ဖို.အတွက်
+    - Sets `player.inCardDraw = true`.
+    - **STOPS** turn progression (does not pass turn to next player yet).
+
+**(Client Side Action)**: အရင်ဆုံး player ရဲ့ card ဆွဲတဲ့ action ကိုစောင့်တယ်
+- Client sees `before-draw`.
+- Shows "Draw Card" button to the current player.
+
+2. **Client**: Player clicks button -> Emits `show-card-effect`. player က emit လုပ်တယ်
+3. **Server**:
+    - Validates player position.
+    - Draws random card from deck.
+    - Emits `draw-card` with card details.
+
+**(Client Side Action)**:
+- Client shows Card Popup.
+- Player clicks "OK" / "Close".
+
+4. **Client**: Emits `confirm-card-effect`.
+5. **Server**:
+    - Executes card effect logic (`applyCardEffect`).
+    - Updates player money/position based on card.
+    - Broadcasts updates: `update-rooms`.
+    - **Passes Turn**: Sets `isActive` to next player.
+
+### C. Standard Turn End (No Special Tile)
+If player did NOT land on Chance/Community Chest:
+1. **Server**:
+    - Emits `move-result` (animation data).
+    - **Passes Turn**: Sets `isActive` to next player.
+    - Broadcasts `update-rooms`.
+
+## 3. Events Summary
+
+### Client -> Server
+- `create-room`, `join-room`, `leave-room`
+- `start-game`
+- `player-move`
+- `show-card-effect`
+- `confirm-card-effect`
+
+### Server -> Client
+- `update-rooms` (Global state update)
+- `dice-rolled` (Animation)
+- `move-result` (Movement animation)
+- `collect-money` (Notification)
+- `before-draw` (Trigger card UI)
+- `draw-card` (Show card content)
