@@ -34,6 +34,7 @@ type Player = {
   inventory: {
     chanceCards: number[];
     communityChestCards: number[];
+    properties: number[];
   };
 };
 
@@ -62,6 +63,7 @@ const rooms: Record<
       inventory: {
         chanceCards: [];
         communityChestCards: [];
+        properties: number[];
       };
     }>;
     maxPlayers: number;
@@ -114,7 +116,9 @@ const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
         type: "community",
         uid: p.uid,
       });
-      console.log(`Player ${p.name} moved back to Community Chest -> Triggering draw`);
+      console.log(
+        `Player ${p.name} moved back to Community Chest -> Triggering draw`,
+      );
     } else if (p.position === 38) {
       // Landed on Luxury Tax (from 1) -> Pay 100
       p.money -= 100;
@@ -166,6 +170,7 @@ const communityEffects: Record<number, (player: Player, room: Room) => void> = {
   1: (p) => {
     // စတင် (GO) သို့ တိုက်ရိုက်သွားပါ
     p.position = 0;
+    p.money += 200;
   },
   2: (p) => {
     // ဘဏ်အမှားကြောင့် ၂၀၀ ရပါ
@@ -304,8 +309,6 @@ const applyCardEffect = (
       });
     }
 
-
-
     // player.inCardDraw = false; // Moved to before effect application
   } else {
     // logic မရှိသေးသော ကတ်နံပါတ်ဆိုလျှင် log ထုတ်ပြမည်
@@ -370,6 +373,7 @@ io.on("connection", (socket) => {
           inventory: {
             chanceCards: [],
             communityChestCards: [],
+            properties: [],
           },
         },
       ],
@@ -408,6 +412,7 @@ io.on("connection", (socket) => {
         inventory: {
           chanceCards: [],
           communityChestCards: [],
+          properties: [],
         },
       });
     }
@@ -450,6 +455,12 @@ io.on("connection", (socket) => {
       isActive: i === 0, // first player starts
       money: 1500,
       position: 0,
+      inCardDraw: false,
+      inventory: {
+        chanceCards: [],
+        communityChestCards: [],
+        properties: [],
+      },
     }));
 
     io.to(roomName).emit("update-rooms", rooms);
@@ -460,8 +471,8 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) return;
 
-    // const dice = Math.floor(Math.random() * 6) + 1;
-    const dice = 36;
+    const dice = Math.floor(Math.random() * 6) + 1;
+    // const dice = 36;
     // ✅ Broadcast dice value to all players
     io.to(roomName).emit("dice-rolled", {
       uid,
@@ -585,8 +596,8 @@ io.on("connection", (socket) => {
     const chancePositions = [7, 22, 36];
     const communityPositions = [2, 17, 33];
     if (chancePositions.includes(player.position)) {
-      // cardId = drawCard(chanceDeck);
-      cardId = 8;
+      cardId = drawCard(chanceDeck);
+      // cardId = 8;
       type = "chance";
 
       console.log(player);
@@ -605,7 +616,7 @@ io.on("connection", (socket) => {
   // client ဘက်က chance နဲ့ community card ကိုရရှိကြောင်း စောင့်ကြည့်ပြီးမှ applyCardEffect ကိုလုပ်မယ်
   socket.on("confirm-card-effect", ({ roomName, uid, deckType, cardId }) => {
     applyCardEffect(roomName, uid, deckType, cardId);
-    
+
     const room = rooms[roomName];
     const player = room.players.find((p) => p.uid === uid);
 
@@ -626,17 +637,91 @@ io.on("connection", (socket) => {
     io.to(roomName).emit("update-rooms", rooms);
   });
 
+  // ================= Buy Property =================
+  socket.on("buy-property", ({ roomName, uid, propertyIndex, price }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Check if property is already owned
+    const isAlreadyOwned = room.players.some((p) =>
+      p.inventory.properties.includes(propertyIndex)
+    );
+    if (isAlreadyOwned) {
+      socket.emit("error", "Property already owned");
+      return;
+    }
+
+    // Check if player has enough money
+    if (player.money < price) {
+      socket.emit("error", "Not enough money");
+      return;
+    }
+
+    // Deduct money and add property to inventory
+    player.money -= price;
+    player.inventory.properties.push(propertyIndex);
+
+    console.log(`✅ Player ${player.name} bought property ${propertyIndex} for $${price}`);
+    console.log(`📦 Player inventory now:`, player.inventory);
+
+    // Broadcast to all players in the room
+    io.to(roomName).emit("property-bought", {
+      uid,
+      propertyIndex,
+      price,
+    });
+
+    // Update room state - include full room data with inventory
+    console.log(`📤 Broadcasting room update for ${roomName}`);
+    console.log(`📦 Player ${player.name} inventory:`, JSON.stringify(player.inventory));
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // Handle disconnect
+  // socket.on("disconnect", () => {
+  //   console.log("❌ Client disconnected", socket.id);
+  //   for (const roomName in rooms) {
+  //     rooms[roomName].players = rooms[roomName].players.filter(
+  //       (p) => p.socketId !== socket.id,
+  //     );
+  //     if (rooms[roomName].players.length === 0) {
+  //       delete rooms[roomName];
+  //     }
+  //   }
+  //   io.emit("update-rooms", rooms);
+  // });
+
   // Handle disconnect
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected", socket.id);
+
     for (const roomName in rooms) {
-      rooms[roomName].players = rooms[roomName].players.filter(
-        (p) => p.socketId !== socket.id,
+      // 1. Find the player before removing them
+      const leavingPlayer = rooms[roomName].players.find(
+        (p) => p.socketId === socket.id,
       );
-      if (rooms[roomName].players.length === 0) {
-        delete rooms[roomName];
+
+      if (leavingPlayer) {
+        // 2. Remove the player from the array
+        rooms[roomName].players = rooms[roomName].players.filter(
+          (p) => p.socketId !== socket.id,
+        );
+
+        // 3. Emit the specific 'leave-player' event with the UID
+        // We send it to everyone in that specific room
+        io.to(roomName).emit("leave-player", { uid: leavingPlayer.uid });
+        console.log("leavingPlayer", leavingPlayer.uid);
+        // 4. Clean up the room if it's empty
+        if (rooms[roomName].players.length === 0) {
+          delete rooms[roomName];
+        }
       }
     }
+
+    // Final sync for the room list UI
     io.emit("update-rooms", rooms);
   });
 });
