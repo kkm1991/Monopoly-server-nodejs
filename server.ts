@@ -31,6 +31,8 @@ type Player = {
   position: number;
   inCardDraw: boolean;
   isActive: boolean;
+  color?: string;
+  pendingJailDecision?: boolean;
   inventory: {
     chanceCards: number[];
     communityChestCards: number[];
@@ -60,9 +62,11 @@ const rooms: Record<
       isActive: boolean;
       // add this to track cards like "Get Out of Jail Free" (only stored ids)
       inCardDraw: boolean;
+      color?: string;
+      pendingJailDecision?: boolean;
       inventory: {
-        chanceCards: [];
-        communityChestCards: [];
+        chanceCards: number[];
+        communityChestCards: number[];
         properties: number[];
       };
     }>;
@@ -71,10 +75,134 @@ const rooms: Record<
   }
 > = {};
 
+// Property Hotels tracking (separate from rooms to persist)
+const propertyHotels: Record<string, Record<number, boolean>> = {};
+
+// Property rent data
+const propertyRentData: Record<number, { rent: number; hotelRent: number; color: string }> = {
+  // Brown properties
+  1: { rent: 4, hotelRent: 20, color: "#955436" },
+  3: { rent: 6, hotelRent: 30, color: "#955436" },
+  // Light Blue properties
+  6: { rent: 8, hotelRent: 40, color: "#AAE0FA" },
+  8: { rent: 8, hotelRent: 40, color: "#AAE0FA" },
+  9: { rent: 10, hotelRent: 50, color: "#AAE0FA" },
+  // Pink properties
+  11: { rent: 12, hotelRent: 60, color: "#D93A96" },
+  13: { rent: 12, hotelRent: 60, color: "#D93A96" },
+  14: { rent: 14, hotelRent: 70, color: "#D93A96" },
+  // Orange properties
+  16: { rent: 14, hotelRent: 70, color: "#F7941D" },
+  18: { rent: 14, hotelRent: 70, color: "#F7941D" },
+  19: { rent: 16, hotelRent: 80, color: "#F7941D" },
+  // Red properties
+  21: { rent: 18, hotelRent: 90, color: "#ED1B24" },
+  23: { rent: 18, hotelRent: 90, color: "#ED1B24" },
+  24: { rent: 20, hotelRent: 100, color: "#ED1B24" },
+  // Yellow properties
+  26: { rent: 22, hotelRent: 110, color: "#FEF200" },
+  27: { rent: 22, hotelRent: 110, color: "#FEF200" },
+  29: { rent: 24, hotelRent: 120, color: "#FEF200" },
+  // Green properties
+  31: { rent: 26, hotelRent: 130, color: "#1FB25A" },
+  32: { rent: 26, hotelRent: 130, color: "#1FB25A" },
+  34: { rent: 28, hotelRent: 140, color: "#1FB25A" },
+  // Dark Blue properties
+  37: { rent: 35, hotelRent: 175, color: "#0072BB" },
+  39: { rent: 50, hotelRent: 200, color: "#0072BB" },
+  // Railroads
+  5: { rent: 25, hotelRent: 25, color: "rail" },
+  15: { rent: 25, hotelRent: 25, color: "rail" },
+  25: { rent: 25, hotelRent: 25, color: "rail" },
+  35: { rent: 25, hotelRent: 25, color: "rail" },
+  // Utilities
+  12: { rent: 0, hotelRent: 0, color: "utility" }, // Electric
+  28: { rent: 0, hotelRent: 0, color: "utility" }, // Water
+};
+
+// Color groups for monopoly check
+const colorGroups: Record<string, number[]> = {
+  "#955436": [1, 3], // Brown
+  "#AAE0FA": [6, 8, 9], // Light Blue
+  "#D93A96": [11, 13, 14], // Pink
+  "#F7941D": [16, 18, 19], // Orange
+  "#ED1B24": [21, 23, 24], // Red
+  "#FEF200": [26, 27, 29], // Yellow
+  "#1FB25A": [31, 32, 34], // Green
+  "#0072BB": [37, 39], // Dark Blue
+  "rail": [5, 15, 25, 35], // Railroads
+  "utility": [12, 28], // Utilities
+};
+
+// Helper function to find property owner
+const findPropertyOwner = (room: Room, propertyIndex: number): Player | null => {
+  return room.players.find(p => p.inventory.properties.includes(propertyIndex)) || null;
+};
+
+// Helper function to check if player has monopoly (all properties of same color)
+const hasColorMonopoly = (room: Room, playerUid: string, color: string): boolean => {
+  const propertiesInColor = colorGroups[color];
+  if (!propertiesInColor) return false;
+  
+  const player = room.players.find(p => p.uid === playerUid);
+  if (!player) return false;
+  
+  return propertiesInColor.every(idx => player.inventory.properties.includes(idx));
+};
+
+// Helper function to calculate rent
+const calculateRent = (
+  room: Room, 
+  propertyIndex: number, 
+  roomName: string,
+  diceRoll: number = 0
+): { rentAmount: number; owner: Player | null; hasMonopoly: boolean; hasHotel: boolean } => {
+  const rentInfo = propertyRentData[propertyIndex];
+  if (!rentInfo) {
+    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
+  }
+  
+  const owner = findPropertyOwner(room, propertyIndex);
+  if (!owner) {
+    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
+  }
+  
+  const hasMonopoly = hasColorMonopoly(room, owner.uid, rentInfo.color);
+  const hasHotel = propertyHotels[roomName]?.[propertyIndex] || false;
+  
+  // Calculate base rent
+  let baseRent = hasHotel ? rentInfo.hotelRent : rentInfo.rent;
+  
+  // Railroad rent calculation (increases with more railroads owned)
+  if (rentInfo.color === "rail") {
+    const railroadsOwned = owner.inventory.properties.filter(p => 
+      [5, 15, 25, 35].includes(p)
+    ).length;
+    // Rent doubles for each additional railroad: 25, 50, 100, 200
+    baseRent = 25 * Math.pow(2, railroadsOwned - 1);
+  }
+  
+  // Utility rent calculation (4x dice roll for 1, 10x for both)
+  if (rentInfo.color === "utility") {
+    const utilitiesOwned = owner.inventory.properties.filter(p => 
+      [12, 28].includes(p)
+    ).length;
+    // If has monopoly (both utilities), rent is 10x dice, otherwise 4x dice
+    const multiplier = hasMonopoly ? 10 : 4;
+    baseRent = multiplier * diceRoll;
+  }
+  
+  // Apply monopoly multiplier for regular properties (2x)
+  const rentAmount = (hasMonopoly && rentInfo.color !== "utility") ? baseRent * 2 : baseRent;
+  
+  return { rentAmount, owner, hasMonopoly, hasHotel };
+};
+
 const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
   1: (p) => {
     // စတင် (GO) သို့ တိုက်ရိုက်သွားပါ
     p.position = 0;
+    p.money += 200; 
   },
   2: (p) => {
     // ပုဂံ သို့ သွားပါ
@@ -370,6 +498,7 @@ io.on("connection", (socket) => {
           position: 0,
           inCardDraw: false,
           isActive: false,
+          color: user.color || "",
           inventory: {
             chanceCards: [],
             communityChestCards: [],
@@ -409,6 +538,7 @@ io.on("connection", (socket) => {
         position: 0,
         inCardDraw: false,
         isActive: false,
+        color: user.color || "",
         inventory: {
           chanceCards: [],
           communityChestCards: [],
@@ -494,8 +624,34 @@ io.on("connection", (socket) => {
     let sentToJail = false;
 
     if (newPos === goToJailPosition) {
-      sentToJail = true;
-      newPos = jailPosition;
+      // Check if player has "Get Out of Jail Free" card
+      const hasJailCard = player.inventory.chanceCards.includes(7) || 
+                          player.inventory.communityChestCards.includes(5);
+      
+      if (hasJailCard) {
+        // Ask player if they want to use the card
+        player.pendingJailDecision = true;
+        io.to(roomName).emit("jail-card-prompt", {
+          uid: player.uid,
+          message: "အချုပ်ခန်းသို့သွားရန် ကျက်သရေပေါက်သည်။ 'အချုပ်ခန်းမှ အခမဲ့ထွက်ခွင့်' ကတ်ကို သုံးလိုပါသလား?"
+        });
+        
+        // Emit move result but stay at current position (don't go to jail yet)
+        io.to(roomName).emit("move-result", {
+          uid,
+          from: oldPos,
+          to: newPos, // Still show they landed on Go To Jail
+          money: player.money,
+          nextPlayerUid: uid, // Still current player's turn until they decide
+        });
+        
+        io.to(roomName).emit("update-rooms", rooms);
+        return; // Stop here, wait for player decision
+      } else {
+        // No jail card, send to jail immediately
+        sentToJail = true;
+        newPos = jailPosition;
+      }
     }
     player.position = newPos;
 
@@ -559,6 +715,49 @@ io.on("connection", (socket) => {
 
       io.to(roomName).emit("update-rooms", rooms);
       return; // Stop here, do not pass turn
+    }
+
+    // ================= RENT PAYMENT LOGIC =================
+    // Check if landed property is owned and pay rent
+    const rentResult = calculateRent(room, player.position, roomName, dice);
+    
+    if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
+      // Check if player has enough money
+      if (player.money < rentResult.rentAmount) {
+        // Player is bankrupt or cannot pay full rent
+        // For now, take all their money
+        const amountPaid = player.money;
+        player.money = 0;
+        rentResult.owner.money += amountPaid;
+        
+        console.log(`⚠️ ${player.name} couldn't pay full rent Ks ${rentResult.rentAmount}, paid Ks ${amountPaid} instead`);
+        
+        io.to(roomName).emit("rent-paid", {
+          fromUid: player.uid,
+          toUid: rentResult.owner.uid,
+          propertyIndex: player.position,
+          amount: amountPaid,
+          hasHotel: rentResult.hasHotel,
+          hasMonopoly: rentResult.hasMonopoly,
+          isPartial: true,
+        });
+      } else {
+        // Pay full rent
+        player.money -= rentResult.rentAmount;
+        rentResult.owner.money += rentResult.rentAmount;
+        
+        console.log(`💰 ${player.name} paid Ks ${rentResult.rentAmount} rent to ${rentResult.owner.name} ${rentResult.hasHotel ? '(with hotel)' : ''} ${rentResult.hasMonopoly ? '(monopoly bonus)' : ''}`);
+        
+        io.to(roomName).emit("rent-paid", {
+          fromUid: player.uid,
+          toUid: rentResult.owner.uid,
+          propertyIndex: player.position,
+          amount: rentResult.rentAmount,
+          hasHotel: rentResult.hasHotel,
+          hasMonopoly: rentResult.hasMonopoly,
+          isPartial: false,
+        });
+      }
     }
 
     // Pass turn to next player (ONLY if not drawing a card)
@@ -677,6 +876,143 @@ io.on("connection", (socket) => {
     // Update room state - include full room data with inventory
     console.log(`📤 Broadcasting room update for ${roomName}`);
     console.log(`📦 Player ${player.name} inventory:`, JSON.stringify(player.inventory));
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Build Hotel =================
+  socket.on("build-hotel", ({ roomName, uid, propertyIndex, cost }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Check if player owns the property
+    if (!player.inventory.properties.includes(propertyIndex)) {
+      socket.emit("error", "You don't own this property");
+      return;
+    }
+
+    // Initialize hotels for room if not exists
+    if (!propertyHotels[roomName]) {
+      propertyHotels[roomName] = {};
+    }
+
+    // Check if hotel already exists
+    if (propertyHotels[roomName][propertyIndex]) {
+      socket.emit("error", "Hotel already built on this property");
+      return;
+    }
+
+    // Check if player has enough money
+    if (player.money < cost) {
+      socket.emit("error", "Not enough money to build hotel");
+      return;
+    }
+
+    // Check if player has monopoly (required to build hotel)
+    const propertyInfo = propertyRentData[propertyIndex];
+    if (!propertyInfo) {
+      socket.emit("error", "Cannot build hotel on this property");
+      return;
+    }
+
+    const hasMonopoly = hasColorMonopoly(room, uid, propertyInfo.color);
+    if (!hasMonopoly) {
+      socket.emit("error", "You need monopoly to build hotel");
+      return;
+    }
+
+    // Build hotel
+    player.money -= cost;
+    propertyHotels[roomName][propertyIndex] = true;
+
+    console.log(`🏨 Player ${player.name} built hotel on property ${propertyIndex} for Ks ${cost}`);
+
+    // Broadcast to all players
+    io.to(roomName).emit("hotel-built", {
+      uid,
+      propertyIndex,
+      cost,
+    });
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Handle Jail Card Decision =================
+  socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player || !player.pendingJailDecision) return;
+
+    // Clear the pending decision
+    player.pendingJailDecision = false;
+
+    const jailPosition = 10;
+    const goToJailPosition = 30;
+
+    if (useCard) {
+      // Player chose to use the card - remove it from inventory
+      const chanceIndex = player.inventory.chanceCards.indexOf(7);
+      const communityIndex = player.inventory.communityChestCards.indexOf(5);
+      
+      if (chanceIndex > -1) {
+        player.inventory.chanceCards.splice(chanceIndex, 1);
+      } else if (communityIndex > -1) {
+        player.inventory.communityChestCards.splice(communityIndex, 1);
+      }
+
+      // Player stays at position 30 (Go To Jail) but doesn't go to jail
+      // Position stays at 30, turn passes to next player
+      console.log(`✅ Player ${player.name} used Get Out of Jail Free card`);
+      
+      io.to(roomName).emit("jail-card-used", {
+        uid,
+        message: `${player.name} က 'အချုပ်ခန်းမှ အခမဲ့ထွက်ခွင့်' ကတ်ကို သုံးခဲ့သည်!`
+      });
+    } else {
+      // Player chose NOT to use the card - send them to jail
+      player.position = jailPosition;
+      console.log(`🔒 Player ${player.name} declined to use jail card and went to jail`);
+      
+      io.to(roomName).emit("move-result", {
+        uid,
+        from: goToJailPosition,
+        to: jailPosition,
+        money: player.money,
+        nextPlayerUid: uid, // Will be updated below
+      });
+    }
+
+    // Pass turn to next player
+    const currentIndex = room.players.findIndex((p) => p.uid === uid);
+    const nextIndex = (currentIndex + 1) % room.players.length;
+    room.players = room.players.map((p, i) => ({
+      ...p,
+      isActive: i === nextIndex,
+    }));
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Set Player Color =================
+  socket.on("set-player-color", ({ roomName, uid, color }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Store color on server
+    player.color = color;
+    console.log(`🎨 Player ${player.name} color set to ${color}`);
+
+    // Broadcast to ALL players in the room (including sender)
+    io.to(roomName).emit("player-color-updated", { uid, color });
+    
+    // Also update room state
     io.to(roomName).emit("update-rooms", rooms);
   });
 
