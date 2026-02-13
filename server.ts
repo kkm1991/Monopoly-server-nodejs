@@ -844,7 +844,7 @@ io.on("connection", (socket) => {
     const player = room.players.find((p) => p.uid === uid);
     if (!player) return;
 
-    // Check if property is already owned
+    // Check if property is already owned (double-check on server)
     const isAlreadyOwned = room.players.some((p) =>
       p.inventory.properties.includes(propertyIndex)
     );
