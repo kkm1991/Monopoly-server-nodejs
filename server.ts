@@ -997,7 +997,7 @@ io.on("connection", (socket) => {
     io.to(roomName).emit("update-rooms", rooms);
   });
 
-  // ================= Set Player Color =================
+// ================= Set Player Color =================
   socket.on("set-player-color", ({ roomName, uid, color }) => {
     const room = rooms[roomName];
     if (!room) return;
@@ -1011,9 +1011,28 @@ io.on("connection", (socket) => {
 
     // Broadcast to ALL players in the room (including sender)
     io.to(roomName).emit("player-color-updated", { uid, color });
-    
+
     // Also update room state
     io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Chat Messages =================
+  socket.on("send-chat-message", ({ roomName, uid, name, message }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    // Broadcast message to all players in the room
+    const chatMessage = {
+      uid,
+      name,
+      message,
+      timestamp: Date.now(),
+    };
+
+    console.log(`💬 Chat in ${roomName}: ${name} says "${message}"`);
+    
+    // Emit to all clients in the room (including sender)
+    io.to(roomName).emit("chat-message", chatMessage);
   });
 
   // Handle disconnect
