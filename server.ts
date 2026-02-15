@@ -2,10 +2,48 @@ import { createServer } from "http";
 
 import { Server } from "socket.io";
 
-const PORT = 4000;
-const server = createServer();
+const PORT = process.env.PORT || 4000;
+const NODE_ENV = process.env.NODE_ENV || "development";
+
+// Configure CORS based on environment
+const corsOrigins = NODE_ENV === "production" 
+  ? (process.env.CORS_ORIGINS?.split(",") || ["https://monopoly-project-phi.vercel.app"])
+  : "*";
+
+const server = createServer((req, res) => {
+  // Health check endpoint for Render.com
+  if (req.url === "/health" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ 
+      status: "healthy", 
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: NODE_ENV
+    }));
+    return;
+  }
+  
+  // Root endpoint
+  if (req.url === "/" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ 
+      message: "Monopoly Socket Server",
+      version: "1.0.0",
+      status: "running"
+    }));
+    return;
+  }
+});
+
 const io = new Server(server, {
-  cors: { origin: "*" },
+  cors: { 
+    origin: corsOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ["websocket", "polling"], // Support both for compatibility
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 const chanceDeck = [...Array(16)].map((_, i) => i + 1);
@@ -1082,5 +1120,8 @@ io.on("connection", (socket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`✅ Socket.IO server running on http://localhost:${PORT}`);
+  console.log(`✅ Socket.IO server running on port ${PORT}`);
+  console.log(`📊 Health check: http://localhost:${PORT}/health`);
+  console.log(`🌍 Environment: ${NODE_ENV}`);
+  console.log(`🌐 CORS origins: ${JSON.stringify(corsOrigins)}`);
 });

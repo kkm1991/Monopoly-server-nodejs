@@ -2,9 +2,14 @@
   "name": "monopoly-socket",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "build": "tsc",
-    "start": "node server.ts"
+    "start": "node ./dist/server.js",
+    "dev": "npx ts-node server.ts",
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "socket.io": "^4.7.5"

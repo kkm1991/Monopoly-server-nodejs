@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: monopoly-socket-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: CORS_ORIGINS
+        value: "https://monopoly-project-phi.vercel.app"
+    autoDeploy: true
+
+# Optional: Add a database if needed in the future
+# databases:
+#   - name: monopoly-db
+#     plan: free
+#     ipAllowList: []  # Allow connections from anywhere
