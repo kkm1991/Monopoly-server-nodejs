@@ -113,6 +113,29 @@ const rooms: Record<
   }
 > = {};
 
+// Default room names that should never be deleted
+const DEFAULT_ROOM_NAMES = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"];
+
+// Helper function to check if a room is a default room
+const isDefaultRoom = (roomName: string): boolean => {
+  return DEFAULT_ROOM_NAMES.includes(roomName);
+};
+
+// Create default rooms when server starts
+const createDefaultRooms = () => {
+  DEFAULT_ROOM_NAMES.forEach((roomName) => {
+    rooms[roomName] = {
+      name: roomName,
+      players: [],
+      maxPlayers: 4,
+      status: "waiting",
+    };
+    console.log(`✅ Default room created: ${roomName}`);
+  });
+  
+  console.log(`🎮 ${DEFAULT_ROOM_NAMES.length} default rooms initialized`);
+};
+
 // Property Hotels tracking (separate from rooms to persist)
 const propertyHotels: Record<string, Record<number, boolean>> = {};
 
@@ -598,13 +621,21 @@ io.on("connection", (socket) => {
     room.players = room.players.filter((p) => p.uid !== uid);
     socket.leave(roomName);
 
-    if (room.players.length === 0) delete rooms[roomName];
+    // Only delete non-default rooms when empty
+    if (room.players.length === 0 && !isDefaultRoom(roomName)) {
+      delete rooms[roomName];
+    }
 
     io.emit("update-rooms", rooms);
   });
 
   // Delete room
   socket.on("delete-room", ({ roomName }) => {
+    // Prevent deletion of default rooms
+    if (isDefaultRoom(roomName)) {
+      socket.emit("error", "Cannot delete default rooms");
+      return;
+    }
     delete rooms[roomName];
     io.emit("update-rooms", rooms);
   });
@@ -1107,8 +1138,8 @@ io.on("connection", (socket) => {
         // We send it to everyone in that specific room
         io.to(roomName).emit("leave-player", { uid: leavingPlayer.uid });
         console.log("leavingPlayer", leavingPlayer.uid);
-        // 4. Clean up the room if it's empty
-        if (rooms[roomName].players.length === 0) {
+        // 4. Clean up the room if it's empty (but don't delete default rooms)
+        if (rooms[roomName].players.length === 0 && !isDefaultRoom(roomName)) {
           delete rooms[roomName];
         }
       }
@@ -1124,4 +1155,7 @@ server.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🌍 Environment: ${NODE_ENV}`);
   console.log(`🌐 CORS origins: ${JSON.stringify(corsOrigins)}`);
+  
+  // Initialize default rooms
+  createDefaultRooms();
 });
