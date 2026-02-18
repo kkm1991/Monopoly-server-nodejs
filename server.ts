@@ -136,49 +136,49 @@ const createDefaultRooms = () => {
   console.log(`🎮 ${DEFAULT_ROOM_NAMES.length} default rooms initialized`);
 };
 
-// Property Hotels tracking (separate from rooms to persist)
-const propertyHotels: Record<string, Record<number, boolean>> = {};
+// Property Buildings tracking (0 = none, 1-4 = houses, 5 = hotel)
+const propertyBuildings: Record<string, Record<number, number>> = {};
 
-// Property rent data
-const propertyRentData: Record<number, { rent: number; hotelRent: number; color: string }> = {
+// Property rent data with house levels
+const propertyRentData: Record<number, { rent: number; houseRents: number[]; hotelRent: number; color: string }> = {
   // Brown properties
-  1: { rent: 4, hotelRent: 20, color: "#955436" },
-  3: { rent: 6, hotelRent: 30, color: "#955436" },
+  1: { rent: 4, houseRents: [20, 60, 180, 320], hotelRent: 450, color: "#955436" },
+  3: { rent: 6, houseRents: [30, 90, 270, 400], hotelRent: 550, color: "#955436" },
   // Light Blue properties
-  6: { rent: 8, hotelRent: 40, color: "#AAE0FA" },
-  8: { rent: 8, hotelRent: 40, color: "#AAE0FA" },
-  9: { rent: 10, hotelRent: 50, color: "#AAE0FA" },
+  6: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA" },
+  8: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA" },
+  9: { rent: 10, houseRents: [50, 150, 450, 625], hotelRent: 750, color: "#AAE0FA" },
   // Pink properties
-  11: { rent: 12, hotelRent: 60, color: "#D93A96" },
-  13: { rent: 12, hotelRent: 60, color: "#D93A96" },
-  14: { rent: 14, hotelRent: 70, color: "#D93A96" },
+  11: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96" },
+  13: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96" },
+  14: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#D93A96" },
   // Orange properties
-  16: { rent: 14, hotelRent: 70, color: "#F7941D" },
-  18: { rent: 14, hotelRent: 70, color: "#F7941D" },
-  19: { rent: 16, hotelRent: 80, color: "#F7941D" },
+  16: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D" },
+  18: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D" },
+  19: { rent: 16, houseRents: [80, 220, 600, 800], hotelRent: 1000, color: "#F7941D" },
   // Red properties
-  21: { rent: 18, hotelRent: 90, color: "#ED1B24" },
-  23: { rent: 18, hotelRent: 90, color: "#ED1B24" },
-  24: { rent: 20, hotelRent: 100, color: "#ED1B24" },
+  21: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24" },
+  23: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24" },
+  24: { rent: 20, houseRents: [100, 300, 750, 925], hotelRent: 1100, color: "#ED1B24" },
   // Yellow properties
-  26: { rent: 22, hotelRent: 110, color: "#FEF200" },
-  27: { rent: 22, hotelRent: 110, color: "#FEF200" },
-  29: { rent: 24, hotelRent: 120, color: "#FEF200" },
+  26: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200" },
+  27: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200" },
+  29: { rent: 24, houseRents: [120, 360, 850, 1025], hotelRent: 1200, color: "#FEF200" },
   // Green properties
-  31: { rent: 26, hotelRent: 130, color: "#1FB25A" },
-  32: { rent: 26, hotelRent: 130, color: "#1FB25A" },
-  34: { rent: 28, hotelRent: 140, color: "#1FB25A" },
+  31: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A" },
+  32: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A" },
+  34: { rent: 28, houseRents: [150, 450, 1000, 1200], hotelRent: 1400, color: "#1FB25A" },
   // Dark Blue properties
-  37: { rent: 35, hotelRent: 175, color: "#0072BB" },
-  39: { rent: 50, hotelRent: 200, color: "#0072BB" },
+  37: { rent: 35, houseRents: [175, 500, 1100, 1300], hotelRent: 1500, color: "#0072BB" },
+  39: { rent: 50, houseRents: [200, 600, 1400, 1700], hotelRent: 2000, color: "#0072BB" },
   // Railroads
-  5: { rent: 25, hotelRent: 25, color: "rail" },
-  15: { rent: 25, hotelRent: 25, color: "rail" },
-  25: { rent: 25, hotelRent: 25, color: "rail" },
-  35: { rent: 25, hotelRent: 25, color: "rail" },
+  5: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
+  15: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
+  25: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
+  35: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
   // Utilities
-  12: { rent: 0, hotelRent: 0, color: "utility" }, // Electric
-  28: { rent: 0, hotelRent: 0, color: "utility" }, // Water
+  12: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility" }, // Electric
+  28: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility" }, // Water
 };
 
 // Color groups for monopoly check
@@ -229,10 +229,17 @@ const calculateRent = (
   }
   
   const hasMonopoly = hasColorMonopoly(room, owner.uid, rentInfo.color);
-  const hasHotel = propertyHotels[roomName]?.[propertyIndex] || false;
+  const buildingLevel = propertyBuildings[roomName]?.[propertyIndex] || 0;
+  const hasHotel = buildingLevel === 5;
+  const houseCount = buildingLevel > 0 && buildingLevel < 5 ? buildingLevel : 0;
   
-  // Calculate base rent
-  let baseRent = hasHotel ? rentInfo.hotelRent : rentInfo.rent;
+  // Calculate base rent based on building level
+  let baseRent = rentInfo.rent;
+  if (hasHotel) {
+    baseRent = rentInfo.hotelRent;
+  } else if (houseCount > 0) {
+    baseRent = rentInfo.houseRents[houseCount - 1];
+  }
   
   // Railroad rent calculation (increases with more railroads owned)
   if (rentInfo.color === "rail") {
@@ -963,12 +970,12 @@ io.on("connection", (socket) => {
     }
 
     // Initialize hotels for room if not exists
-    if (!propertyHotels[roomName]) {
-      propertyHotels[roomName] = {};
+    if (!propertyBuildings[roomName]) {
+      propertyBuildings[roomName] = {};
     }
 
-    // Check if hotel already exists
-    if (propertyHotels[roomName][propertyIndex]) {
+    // Check if hotel already exists (level 5)
+    if (propertyBuildings[roomName][propertyIndex] === 5) {
       socket.emit("error", "Hotel already built on this property");
       return;
     }
@@ -992,9 +999,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Build hotel
+    // Build hotel (level 5)
     player.money -= cost;
-    propertyHotels[roomName][propertyIndex] = true;
+    propertyBuildings[roomName][propertyIndex] = 5;
 
     console.log(`🏨 Player ${player.name} built hotel on property ${propertyIndex} for Ks ${cost}`);
 
@@ -1002,6 +1009,72 @@ io.on("connection", (socket) => {
     io.to(roomName).emit("hotel-built", {
       uid,
       propertyIndex,
+      cost,
+    });
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Build House =================
+  socket.on("build-house", ({ roomName, uid, propertyIndex, cost }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Check if player owns the property
+    if (!player.inventory.properties.includes(propertyIndex)) {
+      socket.emit("error", "You don't own this property");
+      return;
+    }
+
+    // Initialize buildings for room if not exists
+    if (!propertyBuildings[roomName]) {
+      propertyBuildings[roomName] = {};
+    }
+
+    const currentLevel = propertyBuildings[roomName][propertyIndex] || 0;
+
+    // Check if hotel already exists (level 5 = max)
+    if (currentLevel >= 5) {
+      socket.emit("error", "Maximum buildings reached (hotel already built)");
+      return;
+    }
+
+    // Check if player has enough money
+    if (player.money < cost) {
+      socket.emit("error", "Not enough money to build house");
+      return;
+    }
+
+    // Check if player has monopoly (required to build houses)
+    const propertyInfo = propertyRentData[propertyIndex];
+    if (!propertyInfo) {
+      socket.emit("error", "Cannot build house on this property");
+      return;
+    }
+
+    const hasMonopoly = hasColorMonopoly(room, uid, propertyInfo.color);
+    if (!hasMonopoly) {
+      socket.emit("error", "You need monopoly to build houses");
+      return;
+    }
+
+    // Build house (increment level by 1)
+    const newLevel = currentLevel + 1;
+    player.money -= cost;
+    propertyBuildings[roomName][propertyIndex] = newLevel;
+
+    const isHotel = newLevel === 5;
+    console.log(`🏠 Player ${player.name} built ${isHotel ? 'hotel' : 'house ' + newLevel} on property ${propertyIndex} for $${cost}`);
+
+    // Broadcast to all players
+    io.to(roomName).emit("house-built", {
+      uid,
+      propertyIndex,
+      houseCount: newLevel >= 5 ? 4 : newLevel,
+      hasHotel: isHotel,
       cost,
     });
 
@@ -1165,9 +1238,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Check if hotel is built (must sell hotel first)
-    if (propertyHotels[roomName]?.[propertyIndex]) {
-      socket.emit("error", "Sell hotel first before selling property");
+    // Check if any buildings exist (must sell houses/hotel first)
+    if ((propertyBuildings[roomName]?.[propertyIndex] || 0) > 0) {
+      socket.emit("error", "Sell all buildings first before selling property");
       return;
     }
 
@@ -1189,8 +1262,8 @@ io.on("connection", (socket) => {
     player.money += sellPrice;
 
     // Remove hotel data if exists
-    if (propertyHotels[roomName]?.[propertyIndex]) {
-      delete propertyHotels[roomName][propertyIndex];
+    if (propertyBuildings[roomName]?.[propertyIndex]) {
+      delete propertyBuildings[roomName][propertyIndex];
     }
 
     console.log(`💰 Player ${player.name} sold property ${propertyIndex} to bank for $${sellPrice}`);
