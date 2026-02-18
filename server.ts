@@ -1008,6 +1008,204 @@ io.on("connection", (socket) => {
     io.to(roomName).emit("update-rooms", rooms);
   });
 
+  // ================= AUCTION SYSTEM =================
+  // Track active auctions
+  const activeAuctions: Record<string, {
+    propertyIndex: number;
+    currentBid: number;
+    highestBidder: string | null;
+    bids: Array<{ uid: string; name: string; amount: number }>;
+    active: boolean;
+    endTime: number;
+  }> = {};
+
+  // Start auction when player declines to buy property
+  socket.on("start-auction", ({ roomName, propertyIndex, startingPrice }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    // Check if auction already active
+    if (activeAuctions[roomName]?.active) {
+      socket.emit("error", "Auction already in progress");
+      return;
+    }
+
+    const cell = propertyRentData[propertyIndex];
+    const propertyName = cell ? `Property ${propertyIndex}` : `Property ${propertyIndex}`;
+
+    // Initialize auction
+    activeAuctions[roomName] = {
+      propertyIndex,
+      currentBid: startingPrice || 10,
+      highestBidder: null,
+      bids: [],
+      active: true,
+      endTime: Date.now() + 30000, // 30 seconds auction
+    };
+
+    // Broadcast auction start to all players in room
+    io.to(roomName).emit("auction-started", {
+      propertyIndex,
+      startingPrice: startingPrice || 10,
+      propertyName,
+      message: `🔨 Auction started for ${propertyName}! Starting bid: $${startingPrice || 10}`,
+    });
+
+    console.log(`🔨 Auction started in ${roomName} for property ${propertyIndex} at $${startingPrice || 10}`);
+
+    // Auto-end auction after 30 seconds
+    setTimeout(() => {
+      if (activeAuctions[roomName]?.active) {
+        socket.emit("end-auction", { roomName });
+      }
+    }, 30000);
+  });
+
+  // Place bid in auction
+  socket.on("place-bid", ({ roomName, uid, bidAmount }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const auction = activeAuctions[roomName];
+    if (!auction || !auction.active) {
+      socket.emit("error", "No active auction");
+      return;
+    }
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Validate bid
+    if (bidAmount <= auction.currentBid) {
+      socket.emit("error", `Bid must be higher than current bid ($${auction.currentBid})`);
+      return;
+    }
+
+    if (player.money < bidAmount) {
+      socket.emit("error", "Not enough money for this bid");
+      return;
+    }
+
+    // Update auction
+    auction.currentBid = bidAmount;
+    auction.highestBidder = uid;
+    auction.bids.push({ uid, name: player.name, amount: bidAmount });
+
+    console.log(`💰 ${player.name} placed bid of $${bidAmount} in ${roomName}`);
+
+    // Broadcast bid to all players
+    io.to(roomName).emit("bid-placed", {
+      uid,
+      bidAmount,
+      propertyIndex: auction.propertyIndex,
+      message: `${player.name} bid $${bidAmount}`,
+    });
+  });
+
+  // End auction manually or by timeout
+  socket.on("end-auction", ({ roomName }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const auction = activeAuctions[roomName];
+    if (!auction || !auction.active) return;
+
+    auction.active = false;
+
+    if (auction.highestBidder) {
+      const winner = room.players.find((p) => p.uid === auction.highestBidder);
+      if (winner) {
+        // Deduct money from winner
+        winner.money -= auction.currentBid;
+        // Add property to winner's inventory
+        winner.inventory.properties.push(auction.propertyIndex);
+
+        console.log(`🏆 Auction ended in ${roomName}. ${winner.name} won property ${auction.propertyIndex} for $${auction.currentBid}`);
+
+        // Notify all players
+        io.to(roomName).emit("auction-ended", {
+          propertyIndex: auction.propertyIndex,
+          winnerUid: winner.uid,
+          finalPrice: auction.currentBid,
+          message: `🏆 ${winner.name} won the auction for $${auction.currentBid}!`,
+        });
+
+        // Also emit property-bought event for consistency
+        io.to(roomName).emit("property-bought", {
+          uid: winner.uid,
+          propertyIndex: auction.propertyIndex,
+          price: auction.currentBid,
+        });
+      }
+    } else {
+      // No bids placed
+      io.to(roomName).emit("auction-ended", {
+        propertyIndex: auction.propertyIndex,
+        winnerUid: null,
+        finalPrice: 0,
+        message: "🔨 Auction ended with no bids",
+      });
+    }
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // ================= Sell Property to Bank =================
+  socket.on("sell-property-to-bank", ({ roomName, uid, propertyIndex }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
+    // Check if player owns the property
+    const propertyIndexInInventory = player.inventory.properties.indexOf(propertyIndex);
+    if (propertyIndexInInventory === -1) {
+      socket.emit("error", "You don't own this property");
+      return;
+    }
+
+    // Check if hotel is built (must sell hotel first)
+    if (propertyHotels[roomName]?.[propertyIndex]) {
+      socket.emit("error", "Sell hotel first before selling property");
+      return;
+    }
+
+    // Calculate sell price (half of original price based on propertyRentData or default)
+    const propertyInfo = propertyRentData[propertyIndex];
+    // Get original price from property info or use position-based default
+    let originalPrice = 0;
+    if (propertyIndex <= 10) originalPrice = propertyIndex * 20;
+    else if (propertyIndex <= 20) originalPrice = propertyIndex * 15;
+    else if (propertyIndex <= 30) originalPrice = propertyIndex * 12;
+    else originalPrice = propertyIndex * 10;
+
+    const sellPrice = Math.floor(originalPrice / 2);
+
+    // Remove property from inventory
+    player.inventory.properties.splice(propertyIndexInInventory, 1);
+
+    // Add money to player
+    player.money += sellPrice;
+
+    // Remove hotel data if exists
+    if (propertyHotels[roomName]?.[propertyIndex]) {
+      delete propertyHotels[roomName][propertyIndex];
+    }
+
+    console.log(`💰 Player ${player.name} sold property ${propertyIndex} to bank for $${sellPrice}`);
+
+    // Broadcast to all players
+    io.to(roomName).emit("property-sold-to-bank", {
+      uid,
+      propertyIndex,
+      sellPrice,
+      playerName: player.name,
+    });
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
   // ================= Handle Jail Card Decision =================
   socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     const room = rooms[roomName];
@@ -1117,6 +1315,92 @@ io.on("connection", (socket) => {
   //   }
   //   io.emit("update-rooms", rooms);
   // });
+
+  // ================= Trade Between Players =================
+  socket.on("send-trade-offer", ({ roomName, fromUid, toUid, offer, request }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const fromPlayer = room.players.find((p) => p.uid === fromUid);
+    const toPlayer = room.players.find((p) => p.uid === toUid);
+    if (!fromPlayer || !toPlayer) return;
+
+    console.log(`🤝 Trade offer from ${fromPlayer.name} to ${toPlayer.name}`);
+
+    // Send trade offer to target player
+    io.to(roomName).emit("trade-offer-received", {
+      tradeId: Date.now().toString(),
+      fromUid,
+      fromName: fromPlayer.name,
+      toUid,
+      toName: toPlayer.name,
+      offer,
+      request,
+    });
+  });
+
+  socket.on("accept-trade", ({ roomName, tradeId, fromUid, toUid, offer, request }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const fromPlayer = room.players.find((p) => p.uid === fromUid);
+    const toPlayer = room.players.find((p) => p.uid === toUid);
+    if (!fromPlayer || !toPlayer) return;
+
+    // Validate trade - check ownership and funds
+    const fromOwnsProperties = offer.properties.every((prop: number) => 
+      fromPlayer.inventory.properties.includes(prop)
+    );
+    const toOwnsProperties = request.properties.every((prop: number) => 
+      toPlayer.inventory.properties.includes(prop)
+    );
+    const fromHasMoney = fromPlayer.money >= offer.money;
+    const toHasMoney = toPlayer.money >= request.money;
+
+    if (!fromOwnsProperties || !toOwnsProperties || !fromHasMoney || !toHasMoney) {
+      io.to(roomName).emit("trade-failed", { tradeId, message: "Trade validation failed" });
+      return;
+    }
+
+    // Execute trade - transfer properties
+    // From -> To
+    offer.properties.forEach((prop: number) => {
+      const idx = fromPlayer.inventory.properties.indexOf(prop);
+      if (idx > -1) fromPlayer.inventory.properties.splice(idx, 1);
+      toPlayer.inventory.properties.push(prop);
+    });
+
+    // To -> From
+    request.properties.forEach((prop: number) => {
+      const idx = toPlayer.inventory.properties.indexOf(prop);
+      if (idx > -1) toPlayer.inventory.properties.splice(idx, 1);
+      fromPlayer.inventory.properties.push(prop);
+    });
+
+    // Transfer money
+    fromPlayer.money -= offer.money;
+    fromPlayer.money += request.money;
+    toPlayer.money -= request.money;
+    toPlayer.money += offer.money;
+
+    console.log(`✅ Trade completed: ${fromPlayer.name} ↔ ${toPlayer.name}`);
+
+    io.to(roomName).emit("trade-completed", {
+      tradeId,
+      fromUid,
+      fromName: fromPlayer.name,
+      toUid,
+      toName: toPlayer.name,
+      offer,
+      request,
+    });
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  socket.on("decline-trade", ({ roomName, tradeId }) => {
+    io.to(roomName).emit("trade-declined", { tradeId });
+  });
 
   // Handle disconnect
   socket.on("disconnect", () => {
