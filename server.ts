@@ -78,11 +78,20 @@ type Player = {
   };
 };
 
+type CardOffer = {
+  offerId: string;
+  fromUid: string;
+  toUid: string;
+  cardType: 'chance' | 'community';
+  price: number;
+};
+
 type Room = {
   name: string;
   players: Player[];
   maxPlayers: number;
   status: "waiting" | "in-game";
+  pendingCardOffers?: Record<string, CardOffer>;
 };
 
 // In-memory rooms
@@ -110,6 +119,7 @@ const rooms: Record<
     }>;
     maxPlayers: number;
     status: "waiting" | "in-game";
+    pendingCardOffers?: Record<string, CardOffer>;
   }
 > = {};
 
@@ -138,6 +148,16 @@ const createDefaultRooms = () => {
 
 // Property Buildings tracking (0 = none, 1-4 = houses, 5 = hotel)
 const propertyBuildings: Record<string, Record<number, number>> = {};
+
+// Active auctions tracking - MUST be at module level to be shared across all sockets
+const activeAuctions: Record<string, {
+  propertyIndex: number;
+  currentBid: number;
+  highestBidder: string | null;
+  bids: Array<{ uid: string; name: string; amount: number }>;
+  active: boolean;
+  endTime: number;
+}> = {};
 
 // Property rent data with house levels
 const propertyRentData: Record<number, { rent: number; houseRents: number[]; hotelRent: number; color: string }> = {
@@ -570,7 +590,7 @@ io.on("connection", (socket) => {
           inventory: {
             chanceCards: [],
             communityChestCards: [],
-            properties: [],
+            properties: [6, 8, 9],
           },
         },
       ],
@@ -677,8 +697,8 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) return;
 
-    const dice = Math.floor(Math.random() * 6) + 1;
-    // const dice = 36;
+    // const dice = Math.floor(Math.random() * 6) + 1;
+    const dice = 2;
     // ✅ Broadcast dice value to all players
     io.to(roomName).emit("dice-rolled", {
       uid,
@@ -709,7 +729,7 @@ io.on("connection", (socket) => {
         player.pendingJailDecision = true;
         io.to(roomName).emit("jail-card-prompt", {
           uid: player.uid,
-          message: "အချုပ်ခန်းသို့သွားရန် ကျက်သရေပေါက်သည်။ 'အချုပ်ခန်းမှ အခမဲ့ထွက်ခွင့်' ကတ်ကို သုံးလိုပါသလား?"
+          message: "အချုပ်ခန်းသို့သွားရန် ကျသည်။ 'အချုပ်ခန်းမှ အခမဲ့ထွက်ခွင့်' ကတ်ကို သုံးလိုပါသလား?"
         });
         
         // Emit move result but stay at current position (don't go to jail yet)
@@ -871,13 +891,14 @@ io.on("connection", (socket) => {
     const chancePositions = [7, 22, 36];
     const communityPositions = [2, 17, 33];
     if (chancePositions.includes(player.position)) {
-      cardId = drawCard(chanceDeck);
-      // cardId = 8;
+      // cardId = drawCard(chanceDeck);
+      cardId = 7;
       type = "chance";
 
       console.log(player);
     } else if (communityPositions.includes(player.position)) {
-      cardId = drawCard(communityDeck);
+      // cardId = drawCard(communityDeck);
+      cardId=5;
       type = "community";
 
       console.log(player);
@@ -1082,16 +1103,6 @@ io.on("connection", (socket) => {
   });
 
   // ================= AUCTION SYSTEM =================
-  // Track active auctions
-  const activeAuctions: Record<string, {
-    propertyIndex: number;
-    currentBid: number;
-    highestBidder: string | null;
-    bids: Array<{ uid: string; name: string; amount: number }>;
-    active: boolean;
-    endTime: number;
-  }> = {};
-
   // Start auction when player declines to buy property
   socket.on("start-auction", ({ roomName, propertyIndex, startingPrice }) => {
     const room = rooms[roomName];
@@ -1122,14 +1133,17 @@ io.on("connection", (socket) => {
       startingPrice: startingPrice || 10,
       propertyName,
       message: `🔨 Auction started for ${propertyName}! Starting bid: $${startingPrice || 10}`,
+      endTime: Date.now() + 30000,
     });
 
     console.log(`🔨 Auction started in ${roomName} for property ${propertyIndex} at $${startingPrice || 10}`);
 
     // Auto-end auction after 30 seconds
     setTimeout(() => {
-      if (activeAuctions[roomName]?.active) {
-        socket.emit("end-auction", { roomName });
+      const auction = activeAuctions[roomName];
+      if (auction?.active) {
+        console.log(`⏰ Auto-ending auction in ${roomName}`);
+        endAuctionInternal(roomName, room);
       }
     }, 30000);
   });
@@ -1175,27 +1189,21 @@ io.on("connection", (socket) => {
     });
   });
 
-  // End auction manually or by timeout
-  socket.on("end-auction", ({ roomName }) => {
-    const room = rooms[roomName];
-    if (!room) return;
-
+  // Internal function to end auction (used by both timeout and socket event)
+  const endAuctionInternal = (roomName: string, room: any) => {
     const auction = activeAuctions[roomName];
     if (!auction || !auction.active) return;
 
     auction.active = false;
 
     if (auction.highestBidder) {
-      const winner = room.players.find((p) => p.uid === auction.highestBidder);
+      const winner = room.players.find((p: any) => p.uid === auction.highestBidder);
       if (winner) {
-        // Deduct money from winner
         winner.money -= auction.currentBid;
-        // Add property to winner's inventory
         winner.inventory.properties.push(auction.propertyIndex);
 
         console.log(`🏆 Auction ended in ${roomName}. ${winner.name} won property ${auction.propertyIndex} for $${auction.currentBid}`);
 
-        // Notify all players
         io.to(roomName).emit("auction-ended", {
           propertyIndex: auction.propertyIndex,
           winnerUid: winner.uid,
@@ -1203,7 +1211,6 @@ io.on("connection", (socket) => {
           message: `🏆 ${winner.name} won the auction for $${auction.currentBid}!`,
         });
 
-        // Also emit property-bought event for consistency
         io.to(roomName).emit("property-bought", {
           uid: winner.uid,
           propertyIndex: auction.propertyIndex,
@@ -1211,7 +1218,6 @@ io.on("connection", (socket) => {
         });
       }
     } else {
-      // No bids placed
       io.to(roomName).emit("auction-ended", {
         propertyIndex: auction.propertyIndex,
         winnerUid: null,
@@ -1221,6 +1227,13 @@ io.on("connection", (socket) => {
     }
 
     io.to(roomName).emit("update-rooms", rooms);
+  };
+
+  // End auction manually or by timeout
+  socket.on("end-auction", ({ roomName }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+    endAuctionInternal(roomName, room);
   });
 
   // ================= Sell Property to Bank =================
@@ -1305,12 +1318,21 @@ io.on("connection", (socket) => {
       }
 
       // Player stays at position 30 (Go To Jail) but doesn't go to jail
-      // Position stays at 30, turn passes to next player
-      console.log(`✅ Player ${player.name} used Get Out of Jail Free card`);
+      player.position = goToJailPosition;
+      console.log(`✅ Player ${player.name} used Get Out of Jail Free card, staying at position ${goToJailPosition}`);
       
       io.to(roomName).emit("jail-card-used", {
         uid,
         message: `${player.name} က 'အချုပ်ခန်းမှ အခမဲ့ထွက်ခွင့်' ကတ်ကို သုံးခဲ့သည်!`
+      });
+      
+      // Emit move result to ensure all clients update the player's position
+      io.to(roomName).emit("move-result", {
+        uid,
+        from: goToJailPosition,
+        to: goToJailPosition,
+        money: player.money,
+        nextPlayerUid: uid,
       });
     } else {
       // Player chose NOT to use the card - send them to jail
@@ -1473,6 +1495,222 @@ io.on("connection", (socket) => {
 
   socket.on("decline-trade", ({ roomName, tradeId }) => {
     io.to(roomName).emit("trade-declined", { tradeId });
+  });
+
+// ================= Sell Jail Card to Another Player =================
+  // Store pending card sale offers within each room for persistence
+  type CardOffer = {
+    offerId: string;
+    fromUid: string;
+    toUid: string;
+    cardType: 'chance' | 'community';
+    price: number;
+  };
+
+  // Send card sale offer to target player
+  socket.on("sell-jail-card", ({ roomName, fromUid, toUid, cardType, price }) => {
+    const room = rooms[roomName];
+    if (!room) {
+      console.log(`❌ sell-jail-card: Room ${roomName} not found`);
+      return;
+    }
+
+    const fromPlayer = room.players.find((p) => p.uid === fromUid);
+    const toPlayer = room.players.find((p) => p.uid === toUid);
+    
+    if (!fromPlayer || !toPlayer) {
+      console.log(`❌ sell-jail-card: Player not found`, { fromUid, toUid, players: room.players.map(p => p.uid) });
+      socket.emit("error", "Player not found");
+      return;
+    }
+
+    // Check if target player has enough money
+    if (toPlayer.money < price) {
+      socket.emit("error", `${toPlayer.name} doesn't have enough money`);
+      return;
+    }
+
+    // Check if seller has the card
+    let hasCard = false;
+    if (cardType === 'chance') {
+      hasCard = fromPlayer.inventory.chanceCards.some((id: number) => id === 7);
+    } else {
+      hasCard = fromPlayer.inventory.communityChestCards.some((id: number) => id === 5);
+    }
+
+    if (!hasCard) {
+      socket.emit("error", `You don't have a ${cardType} jail card to sell`);
+      return;
+    }
+
+    // Create offer and store in room for persistence
+    const offerId = `card-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    if (!room.pendingCardOffers) {
+      room.pendingCardOffers = {};
+    }
+    room.pendingCardOffers[offerId] = {
+      offerId,
+      fromUid,
+      toUid,
+      cardType,
+      price,
+    };
+
+    console.log(`🎴 ${fromPlayer.name} offered ${cardType} jail card to ${toPlayer.name} for $${price}`);
+    console.log(`📋 Current offers in room:`, Object.keys(room.pendingCardOffers));
+
+    // Send offer to target player
+    io.to(roomName).emit("jail-card-offer-received", {
+      offerId,
+      fromUid,
+      fromName: fromPlayer.name,
+      toUid,
+      cardType,
+      price,
+    });
+
+    // Notify seller
+    socket.emit("jail-card-offer-sent", {
+      offerId,
+      toName: toPlayer.name,
+      cardType,
+      price,
+    });
+  });
+
+  // Accept jail card offer
+  socket.on("accept-jail-card-offer", ({ roomName, offerId }) => {
+    console.log(`🎴 accept-jail-card-offer received: roomName=${roomName}, offerId=${offerId}`);
+    
+    const room = rooms[roomName];
+    if (!room) {
+      console.log(`❌ Room ${roomName} not found. Available rooms:`, Object.keys(rooms));
+      socket.emit("error", "Room not found");
+      return;
+    }
+    
+    const roomOffers = room.pendingCardOffers || {};
+    console.log(`📋 Current pending offers in room:`, Object.keys(roomOffers));
+    
+    const offer = roomOffers[offerId];
+    if (!offer) {
+      console.log(`❌ Offer ${offerId} not found in room ${roomName}`);
+      socket.emit("error", "Offer not found or expired");
+      return;
+    }
+    console.log(`✅ Offer found:`, offer);
+    console.log(`✅ Room found: ${roomName} with ${room.players.length} players`);
+
+    const fromPlayer = room.players.find((p) => p.uid === offer.fromUid);
+    const toPlayer = room.players.find((p) => p.uid === offer.toUid);
+
+    console.log(`👤 Looking for fromPlayer ${offer.fromUid}:`, fromPlayer ? "found" : "NOT FOUND");
+    console.log(`👤 Looking for toPlayer ${offer.toUid}:`, toPlayer ? "found" : "NOT FOUND");
+    console.log(`👥 Room players:`, room.players.map(p => ({ uid: p.uid, name: p.name })));
+
+    if (!fromPlayer || !toPlayer) {
+      socket.emit("error", "Player not found");
+      return;
+    }
+
+    // Check money again
+    if (toPlayer.money < offer.price) {
+      socket.emit("error", "Not enough money to accept offer");
+      delete room.pendingCardOffers![offerId];
+      io.to(roomName).emit("jail-card-offer-declined", { offerId, reason: "Not enough money" });
+      return;
+    }
+
+    // Check if seller still has the card
+    let cardId: number | null = null;
+    if (offer.cardType === 'chance') {
+      const idx = fromPlayer.inventory.chanceCards.findIndex((id: number) => id === 7);
+      if (idx > -1) {
+        const removed = fromPlayer.inventory.chanceCards.splice(idx, 1);
+        cardId = removed[0];
+        console.log(`🎴 Removed chance card 7 from ${fromPlayer.name} at index ${idx}, cardId: ${cardId}`);
+      } else {
+        console.log(`❌ Chance card 7 not found in ${fromPlayer.name}'s inventory:`, fromPlayer.inventory.chanceCards);
+      }
+    } else {
+      const idx = fromPlayer.inventory.communityChestCards.findIndex((id: number) => id === 5);
+      if (idx > -1) {
+        const removed = fromPlayer.inventory.communityChestCards.splice(idx, 1);
+        cardId = removed[0];
+        console.log(`🎴 Removed community card 5 from ${fromPlayer.name} at index ${idx}, cardId: ${cardId}`);
+      } else {
+        console.log(`❌ Community card 5 not found in ${fromPlayer.name}'s inventory:`, fromPlayer.inventory.communityChestCards);
+      }
+    }
+
+    if (cardId === null || cardId === undefined) {
+      socket.emit("error", "Seller no longer has the card");
+      delete room.pendingCardOffers![offerId];
+      io.to(roomName).emit("jail-card-offer-declined", { offerId, reason: "Card no longer available" });
+      return;
+    }
+
+    // Transfer money
+    fromPlayer.money += offer.price;
+    toPlayer.money -= offer.price;
+
+    // Transfer card - ensure inventory arrays are initialized
+    if (!toPlayer.inventory.chanceCards) {
+      toPlayer.inventory.chanceCards = [];
+    }
+    if (!toPlayer.inventory.communityChestCards) {
+      toPlayer.inventory.communityChestCards = [];
+    }
+
+    if (offer.cardType === 'chance') {
+      toPlayer.inventory.chanceCards.push(cardId);
+      console.log(`✅ Transferred chance card ${cardId} to ${toPlayer.name}. New inventory:`, toPlayer.inventory.chanceCards);
+    } else {
+      toPlayer.inventory.communityChestCards.push(cardId);
+      console.log(`✅ Transferred community card ${cardId} to ${toPlayer.name}. New inventory:`, toPlayer.inventory.communityChestCards);
+    }
+
+    console.log(`✅ ${toPlayer.name} accepted ${offer.cardType} jail card from ${fromPlayer.name} for $${offer.price}`);
+
+    // Notify all players
+    io.to(roomName).emit("jail-card-sold", {
+      offerId,
+      fromUid: offer.fromUid,
+      toUid: offer.toUid,
+      cardType: offer.cardType,
+      cardId, // Include the actual card ID
+      price: offer.price,
+      fromName: fromPlayer.name,
+      toName: toPlayer.name,
+    });
+
+    delete room.pendingCardOffers![offerId];
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
+  // Decline jail card offer
+  socket.on("decline-jail-card-offer", ({ roomName, offerId }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+    
+    const roomOffers = room.pendingCardOffers || {};
+    const offer = roomOffers[offerId];
+    if (!offer) return;
+
+    const fromPlayer = room.players.find((p) => p.uid === offer.fromUid);
+
+    console.log(`❌ ${offer.cardType} jail card offer declined`);
+
+    io.to(roomName).emit("jail-card-offer-declined", {
+      offerId,
+      fromUid: offer.fromUid,
+      toUid: offer.toUid,
+      fromName: fromPlayer?.name,
+      cardType: offer.cardType,
+      price: offer.price,
+    });
+
+    delete room.pendingCardOffers![offerId];
   });
 
   // Handle disconnect
