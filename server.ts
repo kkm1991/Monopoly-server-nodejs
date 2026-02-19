@@ -4,6 +4,9 @@ import { Server } from "socket.io";
 
 const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || "development";
+// Voice feature tracking (module level)
+const voiceChannels: Record<string, Set<string>> = {};
+const voiceMessageChunks: Record<string, { chunks: Buffer[]; timestamp: number }> = {};
 
 // Configure CORS based on environment
 const corsOrigins = NODE_ENV === "production" 
@@ -1397,19 +1400,7 @@ io.on("connection", (socket) => {
     io.to(roomName).emit("chat-message", chatMessage);
   });
 
-  // Handle disconnect
-  // socket.on("disconnect", () => {
-  //   console.log("❌ Client disconnected", socket.id);
-  //   for (const roomName in rooms) {
-  //     rooms[roomName].players = rooms[roomName].players.filter(
-  //       (p) => p.socketId !== socket.id,
-  //     );
-  //     if (rooms[roomName].players.length === 0) {
-  //       delete rooms[roomName];
-  //     }
-  //   }
-  //   io.emit("update-rooms", rooms);
-  // });
+   
 
   // ================= Trade Between Players =================
   socket.on("send-trade-offer", ({ roomName, fromUid, toUid, offer, request }) => {
@@ -1713,6 +1704,135 @@ io.on("connection", (socket) => {
     delete room.pendingCardOffers![offerId];
   });
 
+  // ================= VOICE FEATURES =================
+
+// Voice channel join
+socket.on("voice-join", ({ roomName, uid, name }: { roomName: string; uid: string; name: string }) => {
+  if (!voiceChannels[roomName]) {
+    voiceChannels[roomName] = new Set();
+  }
+  
+  // Get existing participants BEFORE adding the new one
+  const existingParticipants: Array<{ uid: string; name: string; socketId: string }> = [];
+  const room = rooms[roomName];
+  if (room) {
+    for (const existingUid of voiceChannels[roomName]) {
+      if (existingUid !== uid) {
+        const player = room.players.find((p) => p.uid === existingUid);
+        if (player) {
+          existingParticipants.push({ uid: existingUid, name: player.name, socketId: player.socketId });
+        }
+      }
+    }
+  }
+  
+  voiceChannels[roomName].add(uid);
+  socket.join(`voice-${roomName}`);
+  
+  console.log(`🎤 ${name} joined voice channel in ${roomName}`);
+  console.log(`🎤 Existing participants:`, existingParticipants.map(p => p.name));
+  
+  io.to(roomName).emit("voice-channel-update", {
+    roomName,
+    participants: Array.from(voiceChannels[roomName]),
+    joined: { uid, name }
+  });
+  
+  // Notify existing peers about the new peer
+  socket.to(`voice-${roomName}`).emit("voice-peer-join", {
+    uid,
+    name,
+    socketId: socket.id
+  });
+  
+  // Notify the new peer about all existing participants
+  for (const participant of existingParticipants) {
+    socket.emit("voice-peer-join", {
+      uid: participant.uid,
+      name: participant.name,
+      socketId: participant.socketId
+    });
+  }
+});
+
+// WebRTC signaling
+socket.on("voice-signal", ({
+  roomName,
+  targetUid,
+  signal
+}: {
+  roomName: string;
+  targetUid: string;
+  signal: { type: "offer" | "answer" | "ice-candidate"; data: any; fromUid: string };
+}) => {
+  const room = rooms[roomName];
+  if (!room) return;
+  
+  const targetPlayer = room.players.find((p) => p.uid === targetUid);
+  if (!targetPlayer) return;
+  
+  io.to(targetPlayer.socketId).emit("voice-signal", {
+    fromUid: signal.fromUid,
+    type: signal.type,
+    data: signal.data
+  });
+});
+
+// Voice leave
+socket.on("voice-leave", ({ roomName, uid, name }: { roomName: string; uid: string; name: string }) => {
+  if (voiceChannels[roomName]) {
+    voiceChannels[roomName].delete(uid);
+    socket.leave(`voice-${roomName}`);
+    
+    io.to(roomName).emit("voice-channel-update", {
+      roomName,
+      participants: Array.from(voiceChannels[roomName]),
+      left: { uid, name }
+    });
+    
+    socket.to(`voice-${roomName}`).emit("voice-peer-leave", { uid });
+    
+    if (voiceChannels[roomName].size === 0) {
+      delete voiceChannels[roomName];
+    }
+  }
+});
+
+// Mute status
+socket.on("voice-mute", ({ roomName, uid, muted }: { roomName: string; uid: string; muted: boolean }) => {
+  socket.to(`voice-${roomName}`).emit("voice-mute", { uid, muted });
+});
+
+// Voice message handling
+socket.on("voice-message-start", ({ roomName, messageId, uid, name, duration }: any) => {
+  voiceMessageChunks[messageId] = { chunks: [], timestamp: Date.now() };
+  socket.to(roomName).emit("voice-message-recording", { uid, name });
+});
+
+socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
+  if (!voiceMessageChunks[messageId]) return;
+  voiceMessageChunks[messageId].chunks.push(Buffer.from(chunk));
+  
+  if (isLast) {
+    const fullBuffer = Buffer.concat(voiceMessageChunks[messageId].chunks);
+    delete voiceMessageChunks[messageId];
+    
+    // Find room
+    const roomName = Object.keys(rooms).find((r) =>
+      rooms[r].players.some((p) => p.socketId === socket.id)
+    );
+    
+    if (roomName) {
+      io.to(roomName).emit("voice-message", {
+        messageId,
+        senderUid: rooms[roomName].players.find((p) => p.socketId === socket.id)?.uid,
+        audioData: fullBuffer.toString("base64"),
+        timestamp: Date.now()
+      });
+    }
+  }
+});
+
   // Handle disconnect
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected", socket.id);
@@ -1739,6 +1859,26 @@ io.on("connection", (socket) => {
         }
       }
     }
+
+     // Voice cleanup
+  for (const roomName in voiceChannels) {
+    const room = rooms[roomName];
+    if (room) {
+      const player = room.players.find((p) => p.socketId === socket.id);
+      if (player && voiceChannels[roomName].has(player.uid)) {
+        voiceChannels[roomName].delete(player.uid);
+        io.to(roomName).emit("voice-channel-update", {
+          roomName,
+          participants: Array.from(voiceChannels[roomName]),
+          left: { uid: player.uid, name: player.name }
+        });
+        socket.to(`voice-${roomName}`).emit("voice-peer-leave", { uid: player.uid });
+        if (voiceChannels[roomName].size === 0) {
+          delete voiceChannels[roomName];
+        }
+      }
+    }
+  }
 
     // Final sync for the room list UI
     io.emit("update-rooms", rooms);
