@@ -700,8 +700,8 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) return;
 
-    // const dice = Math.floor(Math.random() * 6) + 1;
-    const dice = 2;
+    const dice = Math.floor(Math.random() * 6) + 1;
+    // const dice = 2;
     // ✅ Broadcast dice value to all players
     io.to(roomName).emit("dice-rolled", {
       uid,
@@ -894,14 +894,14 @@ io.on("connection", (socket) => {
     const chancePositions = [7, 22, 36];
     const communityPositions = [2, 17, 33];
     if (chancePositions.includes(player.position)) {
-      // cardId = drawCard(chanceDeck);
-      cardId = 7;
+      cardId = drawCard(chanceDeck);
+      // cardId = 7;
       type = "chance";
 
       console.log(player);
     } else if (communityPositions.includes(player.position)) {
-      // cardId = drawCard(communityDeck);
-      cardId=5;
+      cardId = drawCard(communityDeck);
+      // cardId=5;
       type = "community";
 
       console.log(player);
