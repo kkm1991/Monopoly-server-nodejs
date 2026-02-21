@@ -1,6 +1,68 @@
+import express from "express";
 import { createServer } from "http";
-
 import { Server } from "socket.io";
+import cors from "cors";
+import dotenv from "dotenv";
+
+// Load environment variables
+dotenv.config();
+
+const app = express();
+
+// Client API URL for storing player stats
+const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://localhost:3000";
+
+// ================= DATABASE / PERSISTENCE =================
+// Using client-side Neon PostgreSQL via API calls
+
+// Helper to update player stats via client API
+const updatePlayerStats = async (winner: any, players: any[]) => {
+  try {
+    const response = await fetch(`${CLIENT_API_URL}/api/player-stats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ winner, players }),
+    });
+    if (!response.ok) {
+      console.error("Failed to update player stats:", await response.text());
+    } else {
+      console.log("✅ Player stats updated in database");
+    }
+  } catch (error) {
+    console.error("❌ Error updating player stats:", error);
+  }
+};
+
+// API endpoint to get player rankings (for dashboard) - proxy to client API
+app.get("/api/rankings", async (req, res) => {
+  try {
+    const response = await fetch(`${CLIENT_API_URL}/api/rankings`);
+    if (!response.ok) throw new Error("Failed to fetch from client API");
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error("Error proxying rankings:", error);
+    res.status(500).json({ error: "Failed to fetch rankings" });
+  }
+});
+
+// API endpoint to get individual player stats - proxy to client API
+app.get("/api/player/:uid/stats", async (req, res) => {
+  const { uid } = req.params;
+  try {
+    const response = await fetch(`${CLIENT_API_URL}/api/rankings`);
+    if (!response.ok) throw new Error("Failed to fetch from client API");
+    const data = await response.json();
+    const player = data.rankings?.find((r: any) => r.uid === uid);
+    if (!player) {
+      return res.status(404).json({ error: "Player not found" });
+    }
+    res.json({ uid, ...player });
+  } catch (error) {
+    console.error("Error proxying player stats:", error);
+    res.status(500).json({ error: "Failed to fetch player stats" });
+  }
+});
 
 const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || "development";
@@ -36,6 +98,9 @@ const server = createServer((req, res) => {
     }));
     return;
   }
+  
+  // Pass all other requests to Express app (handles /api/rankings, /api/player/*)
+  app(req, res);
 });
 
 const io = new Server(server, {
@@ -74,6 +139,8 @@ type Player = {
   isActive: boolean;
   color?: string;
   pendingJailDecision?: boolean;
+  surrendered?: boolean; // Player surrendered but watching
+  wins?: number; // Total wins for this player
   inventory: {
     chanceCards: number[];
     communityChestCards: number[];
@@ -93,7 +160,9 @@ type Room = {
   name: string;
   players: Player[];
   maxPlayers: number;
-  status: "waiting" | "in-game";
+  status: "waiting" | "in-game" | "finished";
+  gameStartTime?: number; // Track when game started for 20min win condition
+  winner?: string; // UID of winner
   pendingCardOffers?: Record<string, CardOffer>;
 };
 
@@ -114,6 +183,8 @@ const rooms: Record<
       inCardDraw: boolean;
       color?: string;
       pendingJailDecision?: boolean;
+      surrendered?: boolean; // Player surrendered but watching
+      wins?: number; // Total wins for this player
       inventory: {
         chanceCards: number[];
         communityChestCards: number[];
@@ -121,10 +192,16 @@ const rooms: Record<
       };
     }>;
     maxPlayers: number;
-    status: "waiting" | "in-game";
+    status: "waiting" | "in-game" | "finished";
+    gameStartTime?: number; // Track when game started
+    minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
+    winner?: string; // UID of winner
     pendingCardOffers?: Record<string, CardOffer>;
   }
 > = {};
+
+// Game timer tracking
+const gameTimers: Record<string, NodeJS.Timeout> = {};
 
 // Default room names that should never be deleted
 const DEFAULT_ROOM_NAMES = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"];
@@ -561,6 +638,100 @@ const nearestUtility = (current: number) => {
   return utilities[0]; // wrap around
 };
 
+// ================= WIN CONDITION & SURRENDER HELPERS =================
+
+/**
+ * Check if game should end (only one active player remaining)
+ * NOTE: Game always runs full 20 minutes now. Winner determined by money at time-limit.
+ */
+const checkWinCondition = (roomName: string): { hasWinner: boolean; winner?: Player } => {
+  const room = rooms[roomName];
+  if (!room || room.status !== "in-game") return { hasWinner: false };
+
+  // Game always runs full 20 minutes - no early win condition
+  // Winner is determined by most money when timer expires
+  return { hasWinner: false };
+};
+
+/**
+ * End game and declare winner
+ */
+const endGame = async (roomName: string, winner: Player, reason: "last-standing" | "time-limit") => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  const now = new Date().toISOString();
+
+  // Update room status
+  room.status = "finished";
+  room.winner = winner.uid;
+
+  // Clear game timer if exists
+  if (gameTimers[roomName]) {
+    clearTimeout(gameTimers[roomName]);
+    delete gameTimers[roomName];
+  }
+
+  // Save stats to database via client API
+  await updatePlayerStats(
+    { uid: winner.uid, name: winner.name },
+    room.players.map(p => ({ uid: p.uid, name: p.name }))
+  );
+
+  // Broadcast game end
+  io.to(roomName).emit("game-ended", {
+    winner: {
+      uid: winner.uid,
+      name: winner.name,
+      wins: 0, // Will be updated by client
+    },
+    reason,
+    players: room.players.map(p => ({
+      uid: p.uid,
+      name: p.name,
+      wins: 0,
+      surrendered: p.surrendered || false,
+    })),
+  });
+
+  console.log(`🏆 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
+  console.log(`💾 Stats saved to database via client API`);
+};
+
+/**
+ * Start 20-minute game timer
+ */
+const startGameTimer = (roomName: string) => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  // Set game start time
+  room.gameStartTime = Date.now();
+
+  // Clear any existing timer
+  if (gameTimers[roomName]) {
+    clearTimeout(gameTimers[roomName]);
+  }
+
+  // Set 1-minute minimum duration timer (60000ms)
+  // Games lasting less than 1 minute don't qualify for rankings
+  gameTimers[roomName] = setTimeout(() => {
+    const room = rooms[roomName];
+    if (!room || room.status !== "in-game") return;
+    
+    room.minDurationMet = true; // Mark that minimum duration is met
+    console.log(`⏱️ Minimum 1-minute duration met for ${roomName} - games now qualify for rankings`);
+    
+    // Check if only one player left after minimum duration
+    const activePlayers = room.players.filter(p => !p.surrendered);
+    if (activePlayers.length === 1) {
+      endGame(roomName, activePlayers[0], "last-standing");
+    }
+  }, 1 * 60 * 1000); // 1 minute minimum
+
+  console.log(`⏱️ 1-minute minimum duration timer started for ${roomName}`);
+};
+
 io.on("connection", (socket) => {
   // Send all rooms on new connection
   socket.emit("update-rooms", rooms);
@@ -648,6 +819,7 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) return;
 
+    const leavingPlayer = room.players.find(p => p.uid === uid);
     room.players = room.players.filter((p) => p.uid !== uid);
     socket.leave(roomName);
 
@@ -656,7 +828,70 @@ io.on("connection", (socket) => {
       delete rooms[roomName];
     }
 
+    // Check if game should end (player left during active game)
+    if (room.status === "in-game") {
+      const winCheck = checkWinCondition(roomName);
+      if (winCheck.hasWinner && winCheck.winner) {
+        endGame(roomName, winCheck.winner, "last-standing");
+      }
+    }
+
     io.emit("update-rooms", rooms);
+  });
+
+  // ================= Surrender (Stop playing but watch) =================
+  socket.on("surrender", ({ roomName, uid }) => {
+    const room = rooms[roomName];
+    if (!room || room.status !== "in-game") {
+      socket.emit("error", "Cannot surrender - game not in progress");
+      return;
+    }
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) {
+      socket.emit("error", "Player not found");
+      return;
+    }
+
+    // Mark player as surrendered
+    player.surrendered = true;
+    player.isActive = false;
+
+    console.log(`🏳️ ${player.name} surrendered in ${roomName}`);
+
+    // Broadcast surrender to all players
+    io.to(roomName).emit("player-surrendered", {
+      uid: player.uid,
+      name: player.name,
+      message: `${player.name} has surrendered and is now watching`,
+    });
+
+    // Check if game should end
+    const winCheck = checkWinCondition(roomName);
+    if (winCheck.hasWinner && winCheck.winner) {
+      endGame(roomName, winCheck.winner, "last-standing");
+    } else {
+      // Pass turn to next active player if current player surrendered
+      const currentIndex = room.players.findIndex((p) => p.uid === uid);
+      const nextIndex = (currentIndex + 1) % room.players.length;
+      
+      // Find next non-surrendered player
+      let nextPlayerIndex = nextIndex;
+      let loops = 0;
+      while (room.players[nextPlayerIndex]?.surrendered && loops < room.players.length) {
+        nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+        loops++;
+      }
+      
+      if (!room.players[nextPlayerIndex]?.surrendered) {
+        room.players = room.players.map((p, i) => ({
+          ...p,
+          isActive: i === nextPlayerIndex,
+        }));
+      }
+      
+      io.to(roomName).emit("update-rooms", rooms);
+    }
   });
 
   // Delete room
@@ -679,12 +914,17 @@ io.on("connection", (socket) => {
     }
 
     room.status = "in-game";
+    room.gameStartTime = Date.now();
+    room.winner = undefined;
+    
     room.players = room.players.map((p, i) => ({
       ...p,
       isActive: i === 0, // first player starts
       money: 1500,
       position: 0,
       inCardDraw: false,
+      surrendered: false,
+      wins: 0, // Wins initialized to 0, retrieved via API when needed
       inventory: {
         chanceCards: [],
         communityChestCards: [],
@@ -692,7 +932,11 @@ io.on("connection", (socket) => {
       },
     }));
 
+    // Start 20-minute timer
+    startGameTimer(roomName);
+
     io.to(roomName).emit("update-rooms", rooms);
+    console.log(`🎮 Game started in ${roomName} with ${room.players.length} players`);
   });
 
   // ================= Player Move (Dice Roll) =================
@@ -1853,7 +2097,16 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
         // We send it to everyone in that specific room
         io.to(roomName).emit("leave-player", { uid: leavingPlayer.uid });
         console.log("leavingPlayer", leavingPlayer.uid);
-        // 4. Clean up the room if it's empty (but don't delete default rooms)
+        
+        // 4. Check if game should end (player left during active game)
+        if (rooms[roomName].status === "in-game") {
+          const winCheck = checkWinCondition(roomName);
+          if (winCheck.hasWinner && winCheck.winner) {
+            endGame(roomName, winCheck.winner, "last-standing");
+          }
+        }
+        
+        // 5. Clean up the room if it's empty (but don't delete default rooms)
         if (rooms[roomName].players.length === 0 && !isDefaultRoom(roomName)) {
           delete rooms[roomName];
         }
@@ -1890,6 +2143,8 @@ server.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🌍 Environment: ${NODE_ENV}`);
   console.log(`🌐 CORS origins: ${JSON.stringify(corsOrigins)}`);
+  
+ 
   
   // Initialize default rooms
   createDefaultRooms();
