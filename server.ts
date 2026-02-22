@@ -661,6 +661,10 @@ const endGame = async (roomName: string, winner: Player, reason: "last-standing"
   if (!room) return;
 
   const now = new Date().toISOString();
+  
+  // Calculate game duration
+  const gameStartTime = room.gameStartTime || Date.now();
+  const gameDurationSeconds = Math.floor((Date.now() - gameStartTime) / 1000);
 
   // Update room status
   room.status = "finished";
@@ -672,30 +676,37 @@ const endGame = async (roomName: string, winner: Player, reason: "last-standing"
     delete gameTimers[roomName];
   }
 
-  // Save stats to database via client API
-  await updatePlayerStats(
-    { uid: winner.uid, name: winner.name },
-    room.players.map(p => ({ uid: p.uid, name: p.name }))
-  );
+  // Prepare player data with final stats
+  const playerData = room.players.map(p => ({
+    uid: p.uid,
+    name: p.name,
+    money: p.money,
+    position: p.position,
+    properties: p.inventory.properties.length,
+    surrendered: p.surrendered || false,
+    isWinner: p.uid === winner.uid,
+  }));
 
-  // Broadcast game end
+  // Broadcast game end with comprehensive data for rankings
   io.to(roomName).emit("game-ended", {
     winner: {
       uid: winner.uid,
       name: winner.name,
-      wins: 0, // Will be updated by client
+      money: winner.money,
+      properties: winner.inventory.properties.length,
     },
     reason,
-    players: room.players.map(p => ({
-      uid: p.uid,
-      name: p.name,
-      wins: 0,
-      surrendered: p.surrendered || false,
-    })),
+    roomName,
+    gameDurationSeconds,
+    minDurationMet: room.minDurationMet || false,
+    totalPlayers: room.players.length,
+    players: playerData,
+    endedAt: now,
   });
 
   console.log(`🏆 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
-  console.log(`💾 Stats saved to database via client API`);
+  console.log(`⏱️ Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
+  console.log(`📊 Data emitted to clients for ranking storage`);
 };
 
 /**
