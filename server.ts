@@ -655,14 +655,21 @@ const nearestUtility = (current: number) => {
 
 /**
  * Check if game should end (only one active player remaining)
- * NOTE: Game always runs full 20 minutes now. Winner determined by money at time-limit.
+ * After minimum duration (1 minute), if only one player remains, they win
  */
 const checkWinCondition = (roomName: string): { hasWinner: boolean; winner?: Player } => {
   const room = rooms[roomName];
   if (!room || room.status !== "in-game") return { hasWinner: false };
 
-  // Game always runs full 20 minutes - no early win condition
-  // Winner is determined by most money when timer expires
+  // Only check for winner after minimum duration is met
+  if (!room.minDurationMet) return { hasWinner: false };
+
+  // Check if only one active (non-surrendered) player remains
+  const activePlayers = room.players.filter(p => !p.surrendered);
+  if (activePlayers.length === 1) {
+    return { hasWinner: true, winner: activePlayers[0] };
+  }
+
   return { hasWinner: false };
 };
 
