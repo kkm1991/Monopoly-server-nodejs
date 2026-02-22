@@ -79,6 +79,15 @@ const corsOrigins = NODE_ENV === "production"
     ])
   : "*";
 
+// Apply CORS middleware to Express app for HTTP API endpoints
+app.use(cors({
+  origin: corsOrigins,
+  methods: ["GET", "POST"],
+  credentials: true
+}));
+
+ 
+
 const server = createServer((req, res) => {
   // Health check endpoint for Render.com
   if (req.url === "/health" && req.method === "GET") {
@@ -779,7 +788,7 @@ io.on("connection", (socket) => {
           inventory: {
             chanceCards: [],
             communityChestCards: [],
-            properties: [6, 8, 9],
+            properties: [],
           },
         },
       ],
@@ -841,6 +850,7 @@ io.on("connection", (socket) => {
     // Only delete non-default rooms when empty
     if (room.players.length === 0 && !isDefaultRoom(roomName)) {
       delete rooms[roomName];
+      console.log(`🗑️ Room "${roomName}" deleted - no players left`);
     }
 
     // Check if game should end (player left during active game)
