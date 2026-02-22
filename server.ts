@@ -72,7 +72,11 @@ const voiceMessageChunks: Record<string, { chunks: Buffer[]; timestamp: number }
 
 // Configure CORS based on environment
 const corsOrigins = NODE_ENV === "production" 
-  ? (process.env.CORS_ORIGINS?.split(",") || ["https://monopoly-project-phi.vercel.app"])
+  ? (process.env.CORS_ORIGINS?.split(",") || [
+      "https://monopoly-project-phi.vercel.app",
+      "https://www.myanmarpoly.online",
+      "https://myanmarpoly.online"
+    ])
   : "*";
 
 const server = createServer((req, res) => {
