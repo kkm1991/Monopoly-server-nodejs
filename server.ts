@@ -33,6 +33,22 @@ const updatePlayerStats = async (winner: any, players: any[]) => {
   }
 };
 
+// Helper to fetch player wins from API
+const fetchPlayerWins = async (uid: string): Promise<number> => {
+  try {
+    const response = await fetch(`${CLIENT_API_URL}/api/player-stats?uid=${uid}`);
+    if (!response.ok) {
+      console.error(`Failed to fetch stats for ${uid}:`, await response.text());
+      return 0;
+    }
+    const data = await response.json();
+    return data.wins || 0;
+  } catch (error) {
+    console.error(`❌ Error fetching wins for ${uid}:`, error);
+    return 0;
+  }
+};
+
 // API endpoint to get player rankings (for dashboard) - proxy to client API
 app.get("/api/rankings", async (req, res) => {
   try {
@@ -153,6 +169,7 @@ type Player = {
   color?: string;
   pendingJailDecision?: boolean;
   surrendered?: boolean; // Player surrendered but watching
+  bankrupt?: boolean; // Player is bankrupt (lost game but watching)
   wins?: number; // Total wins for this player
   inventory: {
     chanceCards: number[];
@@ -197,6 +214,7 @@ const rooms: Record<
       color?: string;
       pendingJailDecision?: boolean;
       surrendered?: boolean; // Player surrendered but watching
+      bankrupt?: boolean; // Player is bankrupt (lost game but watching)
       wins?: number; // Total wins for this player
       inventory: {
         chanceCards: number[];
@@ -222,6 +240,40 @@ const DEFAULT_ROOM_NAMES = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"];
 // Helper function to check if a room is a default room
 const isDefaultRoom = (roomName: string): boolean => {
   return DEFAULT_ROOM_NAMES.includes(roomName);
+};
+
+// Helper to deduplicate players in a room by uid
+const deduplicatePlayers = <T extends { uid: string }>(players: T[]): T[] => {
+  return players.reduce((acc: T[], player) => {
+    if (!acc.find(p => p.uid === player.uid)) {
+      acc.push(player);
+    }
+    return acc;
+  }, []);
+};
+
+// Helper to emit rooms with deduplicated players
+const emitRooms = () => {
+  const deduplicatedRooms: Record<string, any> = {};
+  for (const [roomName, room] of Object.entries(rooms)) {
+    deduplicatedRooms[roomName] = {
+      ...room,
+      players: deduplicatePlayers(room.players),
+    };
+  }
+  io.emit("update-rooms", deduplicatedRooms);
+};
+
+// Helper to emit rooms to a specific socket
+const emitRoomsToSocket = (socket: any) => {
+  const deduplicatedRooms: Record<string, any> = {};
+  for (const [roomName, room] of Object.entries(rooms)) {
+    deduplicatedRooms[roomName] = {
+      ...room,
+      players: deduplicatePlayers(room.players),
+    };
+  }
+  socket.emit("update-rooms", deduplicatedRooms);
 };
 
 // Create default rooms when server starts
@@ -386,11 +438,17 @@ const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
     p.money += 200; 
   },
   2: (p) => {
-    // ပုဂံ သို့ သွားပါ
+    // ပုဂံ သို့ သွားပါ (Pass GO = get 200)
+    if (p.position > 34) {
+      p.money += 200; // Passed GO
+    }
     p.position = 34;
   },
   3: (p) => {
-    // မေမြို့ သို့ သွားပါ
+    // မေမြို့ သို့ သွားပါ (Pass GO = get 200)
+    if (p.position > 24) {
+      p.money += 200; // Passed GO
+    }
     p.position = 24;
   },
   4: (p) => {
@@ -616,6 +674,101 @@ const applyCardEffect = (
         nextPlayerUid: nextUid, // Correctly anticipate turn pass or stay
         isBackward,
       });
+
+      // ================= RENT PAYMENT FOR CARD MOVEMENTS =================
+      // Check if landed on owned property and pay rent (for cards that move to properties)
+      // Skip rent check for: GO (0), Jail (10), Chance/Community positions
+      const skipRentPositions = [0, 10, 2, 7, 17, 22, 33, 36]; // GO, Jail, Chance, Community
+      if (!skipRentPositions.includes(player.position)) {
+        const rentResult = calculateRent(room, player.position, roomName, 0); // dice=0 for card movement
+        
+        if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
+          // Check if player has enough money
+          if (player.money < rentResult.rentAmount) {
+            // Player cannot pay full rent - check if they have assets to sell
+            const hasProperties = player.inventory.properties.length > 0;
+            const totalPropertiesValue = player.inventory.properties.reduce((sum: number, propIdx: number) => {
+              let origPrice = 0;
+              if (propIdx <= 10) origPrice = propIdx * 20;
+              else if (propIdx <= 20) origPrice = propIdx * 15;
+              else if (propIdx <= 30) origPrice = propIdx * 12;
+              else origPrice = propIdx * 10;
+              return sum + Math.floor(origPrice / 2); // Sell price is half
+            }, 0);
+            
+            const canPayBySelling = totalPropertiesValue >= (rentResult.rentAmount - player.money);
+            
+            if (hasProperties && canPayBySelling) {
+              // Player has properties to sell - emit force-sell event
+              console.log(`🏦 ${player.name} needs to sell properties to pay Ks ${rentResult.rentAmount} rent from card (has Ks ${player.money})`);
+              
+              io.to(roomName).emit("force-sell-required", {
+                uid: player.uid,
+                debtAmount: rentResult.rentAmount - player.money,
+                totalRent: rentResult.rentAmount,
+                ownerUid: rentResult.owner.uid,
+                propertyIndex: player.position,
+                hasHotel: rentResult.hasHotel,
+                hasMonopoly: rentResult.hasMonopoly,
+              });
+              
+              io.to(roomName).emit("update-rooms", rooms);
+              return; // Stop here - wait for player to sell
+            } else {
+              // Player has no properties or not enough - go bankrupt
+              const amountPaid = player.money;
+              player.money = 0;
+              player.bankrupt = true;
+              rentResult.owner.money += amountPaid;
+              
+              console.log(`💀 ${player.name} is BANKRUPT from card! Couldn't pay Ks ${rentResult.rentAmount}, paid Ks ${amountPaid}`);
+              
+              io.to(roomName).emit("player-bankrupt", {
+                uid: player.uid,
+                name: player.name,
+                debtAmount: rentResult.rentAmount - amountPaid,
+                paidAmount: amountPaid,
+                ownerUid: rentResult.owner.uid,
+                ownerName: rentResult.owner.name,
+              });
+              
+              io.to(roomName).emit("rent-paid", {
+                fromUid: player.uid,
+                toUid: rentResult.owner.uid,
+                propertyIndex: player.position,
+                amount: amountPaid,
+                hasHotel: rentResult.hasHotel,
+                hasMonopoly: rentResult.hasMonopoly,
+                isPartial: true,
+                isBankruptcy: true,
+              });
+              
+              // Check for winner
+              const winCheck = checkWinCondition(roomName);
+              if (winCheck.hasWinner && winCheck.winner) {
+                endGame(roomName, winCheck.winner, "last-standing");
+              }
+            }
+          } else {
+            // Pay full rent
+            player.money -= rentResult.rentAmount;
+            rentResult.owner.money += rentResult.rentAmount;
+            
+            console.log(`💰 ${player.name} paid Ks ${rentResult.rentAmount} rent to ${rentResult.owner.name} from card ${rentResult.hasHotel ? '(with hotel)' : ''} ${rentResult.hasMonopoly ? '(monopoly bonus)' : ''}`);
+            
+            io.to(roomName).emit("rent-paid", {
+              fromUid: player.uid,
+              toUid: rentResult.owner.uid,
+              propertyIndex: player.position,
+              amount: rentResult.rentAmount,
+              hasHotel: rentResult.hasHotel,
+              hasMonopoly: rentResult.hasMonopoly,
+              isPartial: false,
+              isFromCard: true,
+            });
+          }
+        }
+      }
     }
 
     // player.inCardDraw = false; // Moved to before effect application
@@ -664,8 +817,8 @@ const checkWinCondition = (roomName: string): { hasWinner: boolean; winner?: Pla
   // Only check for winner after minimum duration is met
   if (!room.minDurationMet) return { hasWinner: false };
 
-  // Check if only one active (non-surrendered) player remains
-  const activePlayers = room.players.filter(p => !p.surrendered);
+  // Check if only one active (non-surrendered, non-bankrupt) player remains
+  const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
   if (activePlayers.length === 1) {
     return { hasWinner: true, winner: activePlayers[0] };
   }
@@ -727,6 +880,12 @@ const endGame = async (roomName: string, winner: Player, reason: "last-standing"
   console.log(`🏆 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
   console.log(`⏱️ Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
   console.log(`📊 Data emitted to clients for ranking storage`);
+
+  // Update player stats in database
+  await updatePlayerStats(
+    { uid: winner.uid, name: winner.name },
+    room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered }))
+  );
 };
 
 /**
@@ -765,19 +924,22 @@ const startGameTimer = (roomName: string) => {
 
 io.on("connection", (socket) => {
   // Send all rooms on new connection
-  socket.emit("update-rooms", rooms);
+  emitRoomsToSocket(socket);
 
   // Lobby requests current rooms
   socket.on("get-rooms", () => {
-    socket.emit("update-rooms", rooms);
+    emitRoomsToSocket(socket);
   });
 
   // Create a new room
-  socket.on("create-room", ({ roomName, maxPlayers, user }) => {
+  socket.on("create-room", async ({ roomName, maxPlayers, user }) => {
     if (!roomName || rooms[roomName]) {
       socket.emit("error", "Room invalid or already exists");
       return;
     }
+
+    // Fetch player's wins from database
+    const playerWins = await fetchPlayerWins(user.uid);
 
     rooms[roomName] = {
       name: roomName,
@@ -792,6 +954,7 @@ io.on("connection", (socket) => {
           inCardDraw: false,
           isActive: false,
           color: user.color || "",
+          wins: playerWins,
           inventory: {
             chanceCards: [],
             communityChestCards: [],
@@ -804,12 +967,12 @@ io.on("connection", (socket) => {
     };
 
     socket.join(roomName);
-    io.emit("update-rooms", rooms);
+    emitRooms();
     socket.emit("room-created", roomName);
   });
 
   // Join existing room
-  socket.on("join-room", ({ roomName, user }) => {
+  socket.on("join-room", async ({ roomName, user }) => {
     const room = rooms[roomName];
     if (!room) {
       socket.emit("error", "Room does not exist");
@@ -822,6 +985,9 @@ io.on("connection", (socket) => {
 
     const exists = room.players.some((p) => p.uid === user.uid);
     if (!exists) {
+      // Fetch player's wins from database
+      const playerWins = await fetchPlayerWins(user.uid);
+
       room.players.push({
         uid: user.uid,
         name: user.name,
@@ -832,6 +998,7 @@ io.on("connection", (socket) => {
         inCardDraw: false,
         isActive: false,
         color: user.color || "",
+        wins: playerWins,
         inventory: {
           chanceCards: [],
           communityChestCards: [],
@@ -841,7 +1008,7 @@ io.on("connection", (socket) => {
     }
 
     socket.join(roomName);
-    io.emit("update-rooms", rooms);
+    emitRooms();
     socket.emit("room-joined", roomName);
   });
 
@@ -868,7 +1035,7 @@ io.on("connection", (socket) => {
       }
     }
 
-    io.emit("update-rooms", rooms);
+    emitRooms();
   });
 
   // ================= Surrender (Stop playing but watch) =================
@@ -926,6 +1093,140 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ================= Declare Bankruptcy (Lost but watch) =================
+  socket.on("declare-bankruptcy", ({ roomName, uid, ownerUid, debtAmount }) => {
+    const room = rooms[roomName];
+    if (!room || room.status !== "in-game") {
+      socket.emit("error", "Cannot declare bankruptcy - game not in progress");
+      return;
+    }
+
+    const player = room.players.find((p) => p.uid === uid);
+    const owner = room.players.find((p) => p.uid === ownerUid);
+    if (!player) {
+      socket.emit("error", "Player not found");
+      return;
+    }
+
+    // Mark player as bankrupt
+    const amountPaid = player.money;
+    player.money = 0;
+    player.bankrupt = true;
+    player.isActive = false;
+    
+    if (owner) {
+      owner.money += amountPaid;
+    }
+
+    console.log(`💀 ${player.name} declared BANKRUPTCY! Paid Ks ${amountPaid} to ${owner?.name || 'bank'}`);
+
+    // Broadcast bankruptcy to all players
+    io.to(roomName).emit("player-bankrupt", {
+      uid: player.uid,
+      name: player.name,
+      debtAmount: debtAmount - amountPaid,
+      paidAmount: amountPaid,
+      ownerUid: ownerUid,
+      ownerName: owner?.name || "Bank",
+    });
+
+    // Check if game should end
+    const winCheck = checkWinCondition(roomName);
+    if (winCheck.hasWinner && winCheck.winner) {
+      endGame(roomName, winCheck.winner, "last-standing");
+    } else {
+      // Pass turn to next active player
+      const currentIndex = room.players.findIndex((p) => p.uid === uid);
+      const nextIndex = (currentIndex + 1) % room.players.length;
+      
+      // Find next non-surrendered/non-bankrupt player
+      let nextPlayerIndex = nextIndex;
+      let loops = 0;
+      while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
+        nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+        loops++;
+      }
+      
+      if (!room.players[nextPlayerIndex]?.surrendered && !room.players[nextPlayerIndex]?.bankrupt) {
+        room.players = room.players.map((p, i) => ({
+          ...p,
+          isActive: i === nextPlayerIndex,
+        }));
+      }
+      
+      io.to(roomName).emit("update-rooms", rooms);
+    }
+  });
+
+  // ================= Pay Debt After Selling Properties =================
+  socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
+    const room = rooms[roomName];
+    if (!room || room.status !== "in-game") {
+      socket.emit("error", "Cannot pay debt - game not in progress");
+      return;
+    }
+
+    const player = room.players.find((p) => p.uid === uid);
+    const owner = room.players.find((p) => p.uid === ownerUid);
+    if (!player) {
+      socket.emit("error", "Player not found");
+      return;
+    }
+
+    // Check if player has enough money to pay
+    if (player.money < amount) {
+      socket.emit("error", "Not enough money to pay debt");
+      return;
+    }
+
+    // Deduct money from player and pay owner
+    player.money -= amount;
+    if (owner) {
+      owner.money += amount;
+    }
+
+    console.log(`💰 ${player.name} paid Ks ${amount} debt to ${owner?.name || 'bank'}`);
+
+    // Emit rent-paid event to show payment
+    io.to(roomName).emit("rent-paid", {
+      fromUid: player.uid,
+      toUid: ownerUid,
+      propertyIndex: propertyIndex,
+      amount: amount,
+      isPartial: false,
+      isDebtPayment: true,
+    });
+
+    // Pass turn to next player
+    const currentIndex = room.players.findIndex((p) => p.uid === uid);
+    const nextIndex = (currentIndex + 1) % room.players.length;
+    
+    // Find next non-surrendered/non-bankrupt player
+    let nextPlayerIndex = nextIndex;
+    let loops = 0;
+    while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
+      nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+      loops++;
+    }
+    
+    if (!room.players[nextPlayerIndex]?.surrendered && !room.players[nextPlayerIndex]?.bankrupt) {
+      room.players = room.players.map((p, i) => ({
+        ...p,
+        isActive: i === nextPlayerIndex,
+      }));
+    }
+
+    io.to(roomName).emit("move-result", {
+      uid,
+      from: player.position,
+      to: player.position,
+      money: player.money,
+      nextPlayerUid: room.players[nextPlayerIndex]?.uid || uid,
+    });
+
+    io.to(roomName).emit("update-rooms", rooms);
+  });
+
   // Delete room
   socket.on("delete-room", ({ roomName }) => {
     // Prevent deletion of default rooms
@@ -934,11 +1235,11 @@ io.on("connection", (socket) => {
       return;
     }
     delete rooms[roomName];
-    io.emit("update-rooms", rooms);
+    emitRooms();
   });
 
   // ================= Start Game =================
-  socket.on("start-game", ({ roomName }) => {
+  socket.on("start-game", async ({ roomName }) => {
     const room = rooms[roomName];
     if (!room || room.players.length < 2) {
       socket.emit("error", "Need at least 2 players to start the game");
@@ -949,6 +1250,10 @@ io.on("connection", (socket) => {
     room.gameStartTime = Date.now();
     room.winner = undefined;
     
+    // Fetch wins for all players from the database
+    const playerWinsPromises = room.players.map((p) => fetchPlayerWins(p.uid));
+    const playerWins = await Promise.all(playerWinsPromises);
+    
     room.players = room.players.map((p, i) => ({
       ...p,
       isActive: i === 0, // first player starts
@@ -956,7 +1261,8 @@ io.on("connection", (socket) => {
       position: 0,
       inCardDraw: false,
       surrendered: false,
-      wins: 0, // Wins initialized to 0, retrieved via API when needed
+      bankrupt: false,
+      wins: playerWins[i], // Set wins from database
       inventory: {
         chanceCards: [],
         communityChestCards: [],
@@ -969,6 +1275,7 @@ io.on("connection", (socket) => {
 
     io.to(roomName).emit("update-rooms", rooms);
     console.log(`🎮 Game started in ${roomName} with ${room.players.length} players`);
+    console.log(`🏆 Player wins loaded:`, room.players.map(p => `${p.name}: ${p.wins}`).join(', '));
   });
 
   // ================= Player Move (Dice Roll) =================
@@ -1099,23 +1406,80 @@ io.on("connection", (socket) => {
     if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
       // Check if player has enough money
       if (player.money < rentResult.rentAmount) {
-        // Player is bankrupt or cannot pay full rent
-        // For now, take all their money
-        const amountPaid = player.money;
-        player.money = 0;
-        rentResult.owner.money += amountPaid;
+        // Player cannot pay full rent - check if they have assets to sell
+        const hasProperties = player.inventory.properties.length > 0;
+        const totalPropertiesValue = player.inventory.properties.reduce((sum: number, propIdx: number) => {
+          const propInfo = propertyRentData[propIdx];
+          let origPrice = 0;
+          if (propIdx <= 10) origPrice = propIdx * 20;
+          else if (propIdx <= 20) origPrice = propIdx * 15;
+          else if (propIdx <= 30) origPrice = propIdx * 12;
+          else origPrice = propIdx * 10;
+          return sum + Math.floor(origPrice / 2); // Sell price is half
+        }, 0);
         
-        console.log(`⚠️ ${player.name} couldn't pay full rent Ks ${rentResult.rentAmount}, paid Ks ${amountPaid} instead`);
+        const canPayBySelling = totalPropertiesValue >= (rentResult.rentAmount - player.money);
         
-        io.to(roomName).emit("rent-paid", {
-          fromUid: player.uid,
-          toUid: rentResult.owner.uid,
-          propertyIndex: player.position,
-          amount: amountPaid,
-          hasHotel: rentResult.hasHotel,
-          hasMonopoly: rentResult.hasMonopoly,
-          isPartial: true,
-        });
+        if (hasProperties && canPayBySelling) {
+          // Player has properties to sell - emit force-sell event
+          console.log(`🏦 ${player.name} needs to sell properties to pay Ks ${rentResult.rentAmount} rent (has Ks ${player.money})`);
+          
+          io.to(roomName).emit("force-sell-required", {
+            uid: player.uid,
+            debtAmount: rentResult.rentAmount - player.money,
+            totalRent: rentResult.rentAmount,
+            ownerUid: rentResult.owner.uid,
+            propertyIndex: player.position,
+            hasHotel: rentResult.hasHotel,
+            hasMonopoly: rentResult.hasMonopoly,
+          });
+          
+          // DON'T pass turn - player must sell properties first
+          io.to(roomName).emit("move-result", {
+            uid,
+            from: oldPos,
+            to: player.position,
+            money: player.money,
+            nextPlayerUid: uid, // Stay on current player
+          });
+          
+          io.to(roomName).emit("update-rooms", rooms);
+          return; // Stop here - wait for player to sell
+        } else {
+          // Player has no properties or not enough - go bankrupt
+          const amountPaid = player.money;
+          player.money = 0;
+          player.bankrupt = true;
+          rentResult.owner.money += amountPaid;
+          
+          console.log(`💀 ${player.name} is BANKRUPT! Couldn't pay Ks ${rentResult.rentAmount}, paid Ks ${amountPaid}`);
+          
+          io.to(roomName).emit("player-bankrupt", {
+            uid: player.uid,
+            name: player.name,
+            debtAmount: rentResult.rentAmount - amountPaid,
+            paidAmount: amountPaid,
+            ownerUid: rentResult.owner.uid,
+            ownerName: rentResult.owner.name,
+          });
+          
+          io.to(roomName).emit("rent-paid", {
+            fromUid: player.uid,
+            toUid: rentResult.owner.uid,
+            propertyIndex: player.position,
+            amount: amountPaid,
+            hasHotel: rentResult.hasHotel,
+            hasMonopoly: rentResult.hasMonopoly,
+            isPartial: true,
+            isBankruptcy: true,
+          });
+          
+          // Check for winner
+          const winCheck = checkWinCondition(roomName);
+          if (winCheck.hasWinner && winCheck.winner) {
+            endGame(roomName, winCheck.winner, "last-standing");
+          }
+        }
       } else {
         // Pay full rent
         player.money -= rentResult.rentAmount;
@@ -2166,7 +2530,7 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
   }
 
     // Final sync for the room list UI
-    io.emit("update-rooms", rooms);
+    emitRooms();
   });
 });
 
