@@ -304,46 +304,49 @@ const activeAuctions: Record<string, {
   endTime: number;
 }> = {};
 
-// Property rent data with house levels
-const propertyRentData: Record<number, { rent: number; houseRents: number[]; hotelRent: number; color: string }> = {
+// Pending property purchases tracking - prevents race conditions
+const pendingPurchases: Record<string, Set<number>> = {};
+
+// Property rent data with house levels and original purchase prices
+const propertyRentData: Record<number, { rent: number; houseRents: number[]; hotelRent: number; color: string; originalPrice: number }> = {
   // Brown properties
-  1: { rent: 4, houseRents: [20, 60, 180, 320], hotelRent: 450, color: "#955436" },
-  3: { rent: 6, houseRents: [30, 90, 270, 400], hotelRent: 550, color: "#955436" },
+  1: { rent: 4, houseRents: [20, 60, 180, 320], hotelRent: 450, color: "#955436", originalPrice: 60 },
+  3: { rent: 6, houseRents: [30, 90, 270, 400], hotelRent: 550, color: "#955436", originalPrice: 80 },
   // Light Blue properties
-  6: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA" },
-  8: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA" },
-  9: { rent: 10, houseRents: [50, 150, 450, 625], hotelRent: 750, color: "#AAE0FA" },
+  6: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA", originalPrice: 100 },
+  8: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA", originalPrice: 100 },
+  9: { rent: 10, houseRents: [50, 150, 450, 625], hotelRent: 750, color: "#AAE0FA", originalPrice: 120 },
   // Pink properties
-  11: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96" },
-  13: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96" },
-  14: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#D93A96" },
+  11: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96", originalPrice: 140 },
+  13: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96", originalPrice: 140 },
+  14: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#D93A96", originalPrice: 160 },
   // Orange properties
-  16: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D" },
-  18: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D" },
-  19: { rent: 16, houseRents: [80, 220, 600, 800], hotelRent: 1000, color: "#F7941D" },
+  16: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D", originalPrice: 180 },
+  18: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D", originalPrice: 180 },
+  19: { rent: 16, houseRents: [80, 220, 600, 800], hotelRent: 1000, color: "#F7941D", originalPrice: 200 },
   // Red properties
-  21: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24" },
-  23: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24" },
-  24: { rent: 20, houseRents: [100, 300, 750, 925], hotelRent: 1100, color: "#ED1B24" },
+  21: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24", originalPrice: 220 },
+  23: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24", originalPrice: 220 },
+  24: { rent: 20, houseRents: [100, 300, 750, 925], hotelRent: 1100, color: "#ED1B24", originalPrice: 240 },
   // Yellow properties
-  26: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200" },
-  27: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200" },
-  29: { rent: 24, houseRents: [120, 360, 850, 1025], hotelRent: 1200, color: "#FEF200" },
+  26: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200", originalPrice: 260 },
+  27: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200", originalPrice: 260 },
+  29: { rent: 24, houseRents: [120, 360, 850, 1025], hotelRent: 1200, color: "#FEF200", originalPrice: 280 },
   // Green properties
-  31: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A" },
-  32: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A" },
-  34: { rent: 28, houseRents: [150, 450, 1000, 1200], hotelRent: 1400, color: "#1FB25A" },
+  31: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A", originalPrice: 300 },
+  32: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A", originalPrice: 300 },
+  34: { rent: 28, houseRents: [150, 450, 1000, 1200], hotelRent: 1400, color: "#1FB25A", originalPrice: 320 },
   // Dark Blue properties
-  37: { rent: 35, houseRents: [175, 500, 1100, 1300], hotelRent: 1500, color: "#0072BB" },
-  39: { rent: 50, houseRents: [200, 600, 1400, 1700], hotelRent: 2000, color: "#0072BB" },
+  37: { rent: 35, houseRents: [175, 500, 1100, 1300], hotelRent: 1500, color: "#0072BB", originalPrice: 350 },
+  39: { rent: 50, houseRents: [200, 600, 1400, 1700], hotelRent: 2000, color: "#0072BB", originalPrice: 400 },
   // Railroads
-  5: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
-  15: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
-  25: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
-  35: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail" },
+  5: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
+  15: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
+  25: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
+  35: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
   // Utilities
-  12: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility" }, // Electric
-  28: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility" }, // Water
+  12: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility", originalPrice: 150 }, // Electric
+  28: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility", originalPrice: 150 }, // Water
 };
 
 // Color groups for monopoly check
@@ -1021,6 +1024,20 @@ io.on("connection", (socket) => {
     room.players = room.players.filter((p) => p.uid !== uid);
     socket.leave(roomName);
 
+    // Reset default room to fresh state when empty
+    if (room.players.length === 0 && isDefaultRoom(roomName)) {
+      room.status = "waiting";
+      room.gameStartTime = undefined;
+      room.minDurationMet = false;
+      room.winner = undefined;
+      // Clear any game timers
+      if (gameTimers[roomName]) {
+        clearTimeout(gameTimers[roomName]);
+        delete gameTimers[roomName];
+      }
+      console.log(`🔄 Default room ${roomName} reset to waiting state - all players left`);
+    }
+
     // Only delete non-default rooms when empty
     if (room.players.length === 0 && !isDefaultRoom(roomName)) {
       delete rooms[roomName];
@@ -1087,6 +1104,12 @@ io.on("connection", (socket) => {
           ...p,
           isActive: i === nextPlayerIndex,
         }));
+        
+        // Emit explicit next-turn event for reliable turn synchronization
+        io.to(roomName).emit("next-turn", {
+          nextPlayerUid: room.players[nextPlayerIndex].uid,
+          nextPlayerIndex: nextPlayerIndex,
+        });
       }
       
       io.to(roomName).emit("update-rooms", rooms);
@@ -1152,6 +1175,12 @@ io.on("connection", (socket) => {
           ...p,
           isActive: i === nextPlayerIndex,
         }));
+        
+        // Emit explicit next-turn event for reliable turn synchronization
+        io.to(roomName).emit("next-turn", {
+          nextPlayerUid: room.players[nextPlayerIndex].uid,
+          nextPlayerIndex: nextPlayerIndex,
+        });
       }
       
       io.to(roomName).emit("update-rooms", rooms);
@@ -1216,6 +1245,12 @@ io.on("connection", (socket) => {
       }));
     }
 
+    // Emit explicit next-turn event for reliable turn synchronization
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[nextPlayerIndex]?.uid || uid,
+      nextPlayerIndex: nextPlayerIndex,
+    });
+
     io.to(roomName).emit("move-result", {
       uid,
       from: player.position,
@@ -1246,6 +1281,19 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Deduplicate players by uid before starting game
+    const uniquePlayers = room.players.reduce((acc: any[], p: any) => {
+      if (!acc.find(existing => existing.uid === p.uid)) {
+        acc.push(p);
+      }
+      return acc;
+    }, []);
+    
+    if (uniquePlayers.length !== room.players.length) {
+      console.log(`⚠️ Removed ${room.players.length - uniquePlayers.length} duplicate players from room ${roomName}`);
+      room.players = uniquePlayers;
+    }
+
     room.status = "in-game";
     room.gameStartTime = Date.now();
     room.winner = undefined;
@@ -1272,6 +1320,12 @@ io.on("connection", (socket) => {
 
     // Start 20-minute timer
     startGameTimer(roomName);
+
+    // Emit explicit next-turn event for reliable turn synchronization when game starts
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[0].uid,
+      nextPlayerIndex: 0,
+    });
 
     io.to(roomName).emit("update-rooms", rooms);
     console.log(`🎮 Game started in ${roomName} with ${room.players.length} players`);
@@ -1500,11 +1554,24 @@ io.on("connection", (socket) => {
     }
 
     // Pass turn to next player (ONLY if not drawing a card)
-    const nextIndex = (currentIndex + 1) % room.players.length;
+    // Find next non-surrendered/non-bankrupt player
+    let nextPlayerIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
+      nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+      loops++;
+    }
+    
     room.players = room.players.map((p, i) => ({
       ...p,
-      isActive: i === nextIndex,
+      isActive: i === nextPlayerIndex,
     }));
+
+    // Emit explicit next-turn event for reliable turn synchronization
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[nextPlayerIndex].uid,
+      nextPlayerIndex: nextPlayerIndex,
+    });
 
     // last move Result
     io.to(roomName).emit("move-result", {
@@ -1512,7 +1579,7 @@ io.on("connection", (socket) => {
       from: oldPos,
       to: player.position,
       money: player.money,
-      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerUid: room.players[nextPlayerIndex].uid,
     });
 
     // Broadcast updated state
@@ -1554,26 +1621,58 @@ io.on("connection", (socket) => {
 
   // client ဘက်က chance နဲ့ community card ကိုရရှိကြောင်း စောင့်ကြည့်ပြီးမှ applyCardEffect ကိုလုပ်မယ်
   socket.on("confirm-card-effect", ({ roomName, uid, deckType, cardId }) => {
+    console.log(`🎴 confirm-card-effect received: ${deckType} card ${cardId} for uid ${uid}`);
+    
     applyCardEffect(roomName, uid, deckType, cardId);
 
     const room = rooms[roomName];
+    if (!room) {
+      console.log(`❌ Room ${roomName} not found in confirm-card-effect`);
+      return;
+    }
+    
     const player = room.players.find((p) => p.uid === uid);
+    console.log(`👤 Player after applyCardEffect: ${player?.name}, inCardDraw: ${player?.inCardDraw}`);
 
     // If the effect triggered another draw (e.g. Chance 8 -> Community Chest),
     // do NOT pass the turn yet.
     if (player && player.inCardDraw) {
+      console.log(`⏹️ Turn NOT passing - player still in card draw`);
       return;
     }
 
     //Now that the effect (like moving to yangon) is applied,
     //we can broadcast the new postion and pass the turn to the next player
     const currentIndex = room.players.findIndex((p) => p.uid === uid);
-    const nextIndex = (currentIndex + 1) % room.players.length;
+    console.log(`🔄 Passing turn from player at index ${currentIndex} (uid: ${uid})`);
+    
+    // Find next non-surrendered/non-bankrupt player
+    let nextIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+      nextIndex = (nextIndex + 1) % room.players.length;
+      loops++;
+    }
+    
+    console.log(`🎯 Next player index: ${nextIndex}, uid: ${room.players[nextIndex]?.uid}, name: ${room.players[nextIndex]?.name}`);
+    
     room.players = room.players.map((p, i) => ({
       ...p,
       isActive: i === nextIndex,
     }));
+    
+    // Verify the active flags
+    const activePlayers = room.players.filter(p => p.isActive);
+    console.log(`✅ Active players count: ${activePlayers.length}, active uid: ${activePlayers[0]?.uid}`);
+    
+    // Emit explicit next-turn event for reliable turn synchronization
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerIndex: nextIndex,
+    });
+    
     io.to(roomName).emit("update-rooms", rooms);
+    console.log(`📤 Emitted next-turn and update-rooms for room ${roomName}`);
   });
 
   // ================= Buy Property =================
@@ -1581,8 +1680,16 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) return;
 
-    const player = room.players.find((p) => p.uid === uid);
-    if (!player) return;
+    // Initialize pending purchases for this room if not exists
+    if (!pendingPurchases[roomName]) {
+      pendingPurchases[roomName] = new Set();
+    }
+
+    // Check if property is already being purchased (race condition protection)
+    if (pendingPurchases[roomName].has(propertyIndex)) {
+      socket.emit("error", "Property purchase is already in progress");
+      return;
+    }
 
     // Check if property is already owned (double-check on server)
     const isAlreadyOwned = room.players.some((p) =>
@@ -1593,11 +1700,17 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const player = room.players.find((p) => p.uid === uid);
+    if (!player) return;
+
     // Check if player has enough money
     if (player.money < price) {
       socket.emit("error", "Not enough money");
       return;
     }
+
+    // Add to pending purchases to prevent race conditions
+    pendingPurchases[roomName].add(propertyIndex);
 
     // Deduct money and add property to inventory
     player.money -= price;
@@ -1605,6 +1718,9 @@ io.on("connection", (socket) => {
 
     console.log(`✅ Player ${player.name} bought property ${propertyIndex} for $${price}`);
     console.log(`📦 Player inventory now:`, player.inventory);
+
+    // Remove from pending purchases after successful purchase
+    pendingPurchases[roomName].delete(propertyIndex);
 
     // Broadcast to all players in the room
     io.to(roomName).emit("property-bought", {
@@ -1616,6 +1732,38 @@ io.on("connection", (socket) => {
     // Update room state - include full room data with inventory
     console.log(`📤 Broadcasting room update for ${roomName}`);
     console.log(`📦 Player ${player.name} inventory:`, JSON.stringify(player.inventory));
+    io.to(roomName).emit("update-rooms", rooms);
+
+    // Pass turn to next player
+    const currentIndex = room.players.findIndex((p) => p.uid === uid);
+    
+    // Find next non-surrendered/non-bankrupt player
+    let nextIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+      nextIndex = (nextIndex + 1) % room.players.length;
+      loops++;
+    }
+    
+    room.players = room.players.map((p, i) => ({
+      ...p,
+      isActive: i === nextIndex,
+    }));
+
+    // Emit explicit next-turn event for reliable turn synchronization
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerIndex: nextIndex,
+    });
+
+    io.to(roomName).emit("move-result", {
+      uid,
+      from: player.position,
+      to: player.position,
+      money: player.money,
+      nextPlayerUid: room.players[nextIndex].uid,
+    });
+
     io.to(roomName).emit("update-rooms", rooms);
   });
 
@@ -1700,9 +1848,9 @@ io.on("connection", (socket) => {
 
     const currentLevel = propertyBuildings[roomName][propertyIndex] || 0;
 
-    // Check if hotel already exists (level 5 = max)
+    // Check if maximum reached (level 5 = hotel is the max)
     if (currentLevel >= 5) {
-      socket.emit("error", "Maximum buildings reached (hotel already built)");
+      socket.emit("error", "Maximum buildings reached - hotel already built (level 5)");
       return;
     }
 
@@ -1900,15 +2048,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Calculate sell price (half of original price based on propertyRentData or default)
+    // Calculate sell price using centralized originalPrice from propertyRentData
     const propertyInfo = propertyRentData[propertyIndex];
-    // Get original price from property info or use position-based default
-    let originalPrice = 0;
-    if (propertyIndex <= 10) originalPrice = propertyIndex * 20;
-    else if (propertyIndex <= 20) originalPrice = propertyIndex * 15;
-    else if (propertyIndex <= 30) originalPrice = propertyIndex * 12;
-    else originalPrice = propertyIndex * 10;
-
+    const originalPrice = propertyInfo?.originalPrice || 0;
     const sellPrice = Math.floor(originalPrice / 2);
 
     // Remove property from inventory
@@ -1922,7 +2064,7 @@ io.on("connection", (socket) => {
       delete propertyBuildings[roomName][propertyIndex];
     }
 
-    console.log(`💰 Player ${player.name} sold property ${propertyIndex} to bank for $${sellPrice}`);
+    console.log(`💰 Player ${player.name} sold property ${propertyIndex} (${propertyInfo ? 'priced at $' + originalPrice : 'unknown price'}) to bank for $${sellPrice}`);
 
     // Broadcast to all players
     io.to(roomName).emit("property-sold-to-bank", {
@@ -1993,11 +2135,25 @@ io.on("connection", (socket) => {
 
     // Pass turn to next player
     const currentIndex = room.players.findIndex((p) => p.uid === uid);
-    const nextIndex = (currentIndex + 1) % room.players.length;
+    
+    // Find next non-surrendered/non-bankrupt player
+    let nextIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+      nextIndex = (nextIndex + 1) % room.players.length;
+      loops++;
+    }
+    
     room.players = room.players.map((p, i) => ({
       ...p,
       isActive: i === nextIndex,
     }));
+
+    // Emit explicit next-turn event for reliable turn synchronization
+    io.to(roomName).emit("next-turn", {
+      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerIndex: nextIndex,
+    });
 
     io.to(roomName).emit("update-rooms", rooms);
   });
