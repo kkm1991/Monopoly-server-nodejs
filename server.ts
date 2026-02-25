@@ -170,6 +170,7 @@ type Player = {
   pendingJailDecision?: boolean;
   surrendered?: boolean; // Player surrendered but watching
   bankrupt?: boolean; // Player is bankrupt (lost game but watching)
+  disconnected?: boolean; // Player temporarily disconnected (can reconnect)
   wins?: number; // Total wins for this player
   inventory: {
     chanceCards: number[];
@@ -215,6 +216,7 @@ const rooms: Record<
       pendingJailDecision?: boolean;
       surrendered?: boolean; // Player surrendered but watching
       bankrupt?: boolean; // Player is bankrupt (lost game but watching)
+      disconnected?: boolean; // Player temporarily disconnected (can reconnect)
       wins?: number; // Total wins for this player
       inventory: {
         chanceCards: number[];
@@ -807,7 +809,42 @@ const nearestUtility = (current: number) => {
   return utilities[0]; // wrap around
 };
 
-// ================= WIN CONDITION & SURRENDER HELPERS =================
+// Helper function to return player assets to bank
+const returnAssetsToBank = (roomName: string, player: Player) => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  // Get all properties to return
+  const propertiesToReturn = [...player.inventory.properties];
+  const chanceCards = [...player.inventory.chanceCards];
+  const communityCards = [...player.inventory.communityChestCards];
+
+  // Clear player's inventory
+  player.inventory.properties = [];
+  player.inventory.chanceCards = [];
+  player.inventory.communityChestCards = [];
+
+  // Remove buildings from all properties
+  if (propertyBuildings[roomName]) {
+    propertiesToReturn.forEach(propIndex => {
+      if (propertyBuildings[roomName][propIndex] !== undefined) {
+        delete propertyBuildings[roomName][propIndex];
+      }
+    });
+  }
+
+  console.log(`🏦 Assets returned to bank from ${player.name}: ${propertiesToReturn.length} properties, ${chanceCards.length} chance cards, ${communityCards.length} community cards`);
+
+  // Emit event to notify all players that assets are back to bank
+  io.to(roomName).emit("assets-returned-to-bank", {
+    uid: player.uid,
+    name: player.name,
+    properties: propertiesToReturn,
+    message: `${player.name}'s assets have been returned to the bank and are now available for purchase`,
+  });
+
+  return { properties: propertiesToReturn, chanceCards, communityCards };
+};
 
 /**
  * Check if game should end (only one active player remaining)
@@ -981,34 +1018,65 @@ io.on("connection", (socket) => {
       socket.emit("error", "Room does not exist");
       return;
     }
+
+    // Check if player was previously disconnected (reconnecting)
+    const disconnectedPlayer = room.players.find((p) => p.uid === user.uid && p.disconnected);
+    if (disconnectedPlayer) {
+      // Reconnect the player
+      disconnectedPlayer.disconnected = false;
+      disconnectedPlayer.socketId = socket.id;
+      console.log(`🔌 Player ${disconnectedPlayer.name} reconnected to ${roomName}`);
+      
+      socket.join(roomName);
+      emitRooms();
+      socket.emit("room-joined", roomName);
+      socket.emit("player-reconnected", {
+        uid: disconnectedPlayer.uid,
+        name: disconnectedPlayer.name,
+        message: "Welcome back! You have rejoined the game.",
+      });
+      
+      // Notify other players
+      io.to(roomName).emit("player-reconnected-notification", {
+        uid: disconnectedPlayer.uid,
+        name: disconnectedPlayer.name,
+        message: `${disconnectedPlayer.name} has reconnected to the game`,
+      });
+      return;
+    }
+
+    // Check if player already exists (not disconnected)
+    const exists = room.players.some((p) => p.uid === user.uid);
+    if (exists) {
+      socket.emit("error", "You are already in this room");
+      return;
+    }
+
     if (room.players.length >= room.maxPlayers) {
       socket.emit("error", "Room full");
       return;
     }
 
-    const exists = room.players.some((p) => p.uid === user.uid);
-    if (!exists) {
-      // Fetch player's wins from database
-      const playerWins = await fetchPlayerWins(user.uid);
+    // Fetch player's wins from database
+    const playerWins = await fetchPlayerWins(user.uid);
 
-      room.players.push({
-        uid: user.uid,
-        name: user.name,
-        identifier: user.identifier,
-        socketId: socket.id,
-        money: 1500,
-        position: 0,
-        inCardDraw: false,
-        isActive: false,
-        color: user.color || "",
-        wins: playerWins,
-        inventory: {
-          chanceCards: [],
-          communityChestCards: [],
-          properties: [],
-        },
-      });
-    }
+    room.players.push({
+      uid: user.uid,
+      name: user.name,
+      identifier: user.identifier,
+      socketId: socket.id,
+      money: 1500,
+      position: 0,
+      inCardDraw: false,
+      isActive: false,
+      color: user.color || "",
+      wins: playerWins,
+      inventory: {
+        chanceCards: [],
+        communityChestCards: [],
+        properties: [],
+      },
+    });
 
     socket.join(roomName);
     emitRooms();
@@ -1021,6 +1089,12 @@ io.on("connection", (socket) => {
     if (!room) return;
 
     const leavingPlayer = room.players.find(p => p.uid === uid);
+    
+    // Return assets to bank if game is in progress and player is leaving
+    if (leavingPlayer && room.status === "in-game") {
+      returnAssetsToBank(roomName, leavingPlayer);
+    }
+    
     room.players = room.players.filter((p) => p.uid !== uid);
     socket.leave(roomName);
 
@@ -1068,6 +1142,9 @@ io.on("connection", (socket) => {
       socket.emit("error", "Player not found");
       return;
     }
+
+    // Return all assets to bank before surrendering
+    returnAssetsToBank(roomName, player);
 
     // Mark player as surrendered
     player.surrendered = true;
@@ -1130,6 +1207,9 @@ io.on("connection", (socket) => {
       socket.emit("error", "Player not found");
       return;
     }
+
+    // Return all assets to bank before bankruptcy
+    returnAssetsToBank(roomName, player);
 
     // Mark player as bankrupt
     const amountPaid = player.money;
@@ -2634,56 +2714,84 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     console.log("❌ Client disconnected", socket.id);
 
     for (const roomName in rooms) {
-      // 1. Find the player before removing them
-      const leavingPlayer = rooms[roomName].players.find(
+      // 1. Find the player who disconnected
+      const disconnectedPlayer = rooms[roomName].players.find(
         (p) => p.socketId === socket.id,
       );
 
-      if (leavingPlayer) {
-        // 2. Remove the player from the array
-        rooms[roomName].players = rooms[roomName].players.filter(
-          (p) => p.socketId !== socket.id,
-        );
-
-        // 3. Emit the specific 'leave-player' event with the UID
-        // We send it to everyone in that specific room
-        io.to(roomName).emit("leave-player", { uid: leavingPlayer.uid });
-        console.log("leavingPlayer", leavingPlayer.uid);
+      if (disconnectedPlayer) {
+        // 2. Mark player as disconnected instead of removing them
+        disconnectedPlayer.disconnected = true;
+        disconnectedPlayer.socketId = ""; // Clear socketId
         
-        // 4. Check if game should end (player left during active game)
-        if (rooms[roomName].status === "in-game") {
-          const winCheck = checkWinCondition(roomName);
-          if (winCheck.hasWinner && winCheck.winner) {
-            endGame(roomName, winCheck.winner, "last-standing");
+        // If it was their turn, pass to next player
+        if (disconnectedPlayer.isActive && rooms[roomName].status === "in-game") {
+          disconnectedPlayer.isActive = false;
+          
+          // Find next non-surrendered/non-bankrupt/non-disconnected player
+          const currentIndex = rooms[roomName].players.findIndex((p) => p.uid === disconnectedPlayer.uid);
+          let nextIndex = (currentIndex + 1) % rooms[roomName].players.length;
+          let loops = 0;
+          while (
+            (rooms[roomName].players[nextIndex]?.surrendered || 
+             rooms[roomName].players[nextIndex]?.bankrupt ||
+             rooms[roomName].players[nextIndex]?.disconnected) && 
+            loops < rooms[roomName].players.length
+          ) {
+            nextIndex = (nextIndex + 1) % rooms[roomName].players.length;
+            loops++;
+          }
+          
+          // Set next player as active if found
+          const nextPlayer = rooms[roomName].players[nextIndex];
+          if (nextPlayer && !nextPlayer.surrendered && !nextPlayer.bankrupt && !nextPlayer.disconnected) {
+            nextPlayer.isActive = true;
+            io.to(roomName).emit("next-turn", {
+              nextPlayerUid: nextPlayer.uid,
+              nextPlayerIndex: nextIndex,
+            });
           }
         }
+
+        // 3. Emit the specific 'player-disconnected' event with the UID
+        io.to(roomName).emit("player-disconnected", { 
+          uid: disconnectedPlayer.uid,
+          name: disconnectedPlayer.name,
+          message: `${disconnectedPlayer.name} has disconnected. They can reconnect to resume.`,
+        });
+        console.log(`🔌 Player ${disconnectedPlayer.name} (${disconnectedPlayer.uid}) marked as disconnected in ${roomName}`);
         
-        // 5. Clean up the room if it's empty (but don't delete default rooms)
-        if (rooms[roomName].players.length === 0 && !isDefaultRoom(roomName)) {
-          delete rooms[roomName];
+        // 4. Check if game should end (all remaining active players disconnected or eliminated)
+        if (rooms[roomName].status === "in-game") {
+          const activePlayers = rooms[roomName].players.filter(
+            p => !p.surrendered && !p.bankrupt && !p.disconnected
+          );
+          if (activePlayers.length === 1 && rooms[roomName].minDurationMet) {
+            endGame(roomName, activePlayers[0], "last-standing");
+          }
         }
       }
     }
 
-     // Voice cleanup
-  for (const roomName in voiceChannels) {
-    const room = rooms[roomName];
-    if (room) {
-      const player = room.players.find((p) => p.socketId === socket.id);
-      if (player && voiceChannels[roomName].has(player.uid)) {
-        voiceChannels[roomName].delete(player.uid);
-        io.to(roomName).emit("voice-channel-update", {
-          roomName,
-          participants: Array.from(voiceChannels[roomName]),
-          left: { uid: player.uid, name: player.name }
-        });
-        socket.to(`voice-${roomName}`).emit("voice-peer-leave", { uid: player.uid });
-        if (voiceChannels[roomName].size === 0) {
-          delete voiceChannels[roomName];
+    // Voice cleanup
+    for (const roomName in voiceChannels) {
+      const room = rooms[roomName];
+      if (room) {
+        const player = room.players.find((p) => p.socketId === socket.id);
+        if (player && voiceChannels[roomName].has(player.uid)) {
+          voiceChannels[roomName].delete(player.uid);
+          io.to(roomName).emit("voice-channel-update", {
+            roomName,
+            participants: Array.from(voiceChannels[roomName]),
+            left: { uid: player.uid, name: player.name }
+          });
+          socket.to(`voice-${roomName}`).emit("voice-peer-leave", { uid: player.uid });
+          if (voiceChannels[roomName].size === 0) {
+            delete voiceChannels[roomName];
+          }
         }
       }
     }
-  }
 
     // Final sync for the room list UI
     emitRooms();
