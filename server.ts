@@ -444,22 +444,25 @@ const calculateRent = (
 };
 
 const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
-  1: (p) => {
+  1: (p, room) => {
     // စတင် (GO) သို့ တိုက်ရိုက်သွားပါ
     p.position = 0;
-    p.money += 200; 
+    p.money += 200;
+    io.to(room.name).emit("collect-money", { uid: p.uid, reason: "card" });
   },
-  2: (p) => {
+  2: (p, room) => {
     // ပုဂံ သို့ သွားပါ (Pass GO = get 200)
     if (p.position > 34) {
       p.money += 200; // Passed GO
+      io.to(room.name).emit("collect-money", { uid: p.uid, reason: "card" });
     }
     p.position = 34;
   },
-  3: (p) => {
+  3: (p, room) => {
     // မေမြို့ သို့ သွားပါ (Pass GO = get 200)
     if (p.position > 24) {
       p.money += 200; // Passed GO
+      io.to(room.name).emit("collect-money", { uid: p.uid, reason: "card" });
     }
     p.position = 24;
   },
@@ -487,7 +490,7 @@ const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
     if (p.position === 0) {
       // Landed on GO (from 3) -> Collect 200
       p.money += 200;
-      io.to(room.name).emit("collect-money", { uid: p.uid });
+      io.to(room.name).emit("collect-money", { uid: p.uid, reason: "card" });
     } else if (p.position === 33) {
       // Landed on Community Chest (from 36) -> Draw Card
       p.inCardDraw = true;
@@ -546,10 +549,11 @@ const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
 
 // Community Chest (ပဟေဠိ) ကတ်များ၏ Logic
 const communityEffects: Record<number, (player: Player, room: Room) => void> = {
-  1: (p) => {
+  1: (p, room) => {
     // စတင် (GO) သို့ တိုက်ရိုက်သွားပါ
     p.position = 0;
     p.money += 200;
+    io.to(room.name).emit("collect-money", { uid: p.uid, reason: "card" });
   },
   2: (p) => {
     // ဘဏ်အမှားကြောင့် ၂၀၀ ရပါ
@@ -1484,6 +1488,7 @@ io.on("connection", (socket) => {
       // If player has reached "Go", collect $200
       io.to(roomName).emit("collect-money", {
         uid: player.uid,
+        reason: "dice"
       });
       player.money += 200;
     }
@@ -2180,13 +2185,14 @@ io.on("connection", (socket) => {
 
     if (useCard) {
       // Player chose to use the card - remove it from inventory
-      const chanceIndex = player.inventory.chanceCards.indexOf(7);
-      const communityIndex = player.inventory.communityChestCards.indexOf(5);
-      
-      if (chanceIndex > -1) {
-        player.inventory.chanceCards.splice(chanceIndex, 1);
-      } else if (communityIndex > -1) {
-        player.inventory.communityChestCards.splice(communityIndex, 1);
+      const _chanceIndex = player.inventory.chanceCards.indexOf(7);
+      if (_chanceIndex > -1) {
+        player.inventory.chanceCards.splice(_chanceIndex, 1);
+      } else {
+        const _communityIndex = player.inventory.communityChestCards.indexOf(5);
+        if (_communityIndex > -1) {
+          player.inventory.communityChestCards.splice(_communityIndex, 1);
+        }
       }
 
       // Player stays at position 30 (Go To Jail) but doesn't go to jail
