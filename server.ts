@@ -138,9 +138,16 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["websocket", "polling"], // Support both for compatibility
-  pingTimeout: 60000,
-  pingInterval: 25000
+  transports: ["websocket", "polling"],
+  // Aggressive ping settings to keep Render connection alive
+  pingTimeout: 120000,  // 2 minutes - longer than Render's idle timeout
+  pingInterval: 30000,  // 30 seconds - frequent keep-alive pings
+  // Connection recovery settings
+  connectTimeout: 60000,
+  maxHttpBufferSize: 1e6,
+  // Allow upgrade from polling to websocket for reliability
+  allowUpgrades: true,
+  perMessageDeflate: false // Disable compression to reduce overhead
 });
 
 const chanceDeck = [...Array(16)].map((_, i) => i + 1);
