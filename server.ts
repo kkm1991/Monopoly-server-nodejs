@@ -3,30 +3,45 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import dotenv from "dotenv";
+import { Pool } from 'pg';
 
 // Load environment variables
-dotenv.config();
+dotenv.config({ path: '../monopoloy-project/.env.local' });
+
+const databaseUrl = process.env.DATABASE_URL?.includes('?') 
+  ? `${process.env.DATABASE_URL}&sslmode=require` 
+  : `${process.env.DATABASE_URL}?sslmode=require`;
+
+const pool = new Pool({
+  connectionString: databaseUrl,
+  ssl: { rejectUnauthorized: false }
+});
 
 const app = express();
 
 // Client API URL for storing player stats
-const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://localhost:3000";
+const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000";
 
 // ================= DATABASE / PERSISTENCE =================
 // Using client-side Neon PostgreSQL via API calls
 
 // Helper to update player stats via client API
-const updatePlayerStats = async (winner: any, players: any[]) => {
+const updatePlayerStats = async (winner: any, players: any[], gameId?: string) => {
   try {
     const response = await fetch(`${CLIENT_API_URL}/api/player-stats`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ winner, players }),
+      body: JSON.stringify({ winner, players, gameId }),
     });
     if (!response.ok) {
       console.error("Failed to update player stats:", await response.text());
     } else {
-      console.log("✅ Player stats updated in database");
+      const result = await response.json();
+      if (result.skipped) {
+        console.log(`⏭️ Player stats update skipped: ${result.message}`);
+      } else {
+        console.log("✅ Player stats updated in database");
+      }
     }
   } catch (error) {
     console.error("❌ Error updating player stats:", error);
@@ -46,6 +61,52 @@ const fetchPlayerWins = async (uid: string): Promise<number> => {
   } catch (error) {
     console.error(`❌ Error fetching wins for ${uid}:`, error);
     return 0;
+  }
+};
+
+// Helper: Fetch player's economy and cosmetics
+const fetchPlayerEconomy = async (uid: string) => {
+  try {
+    const res = await pool.query(`
+      SELECT u.coins, u.gems, ec.dice_skin, ec.board_theme, ec.avatar
+      FROM users u
+      LEFT JOIN equipped_cosmetics ec ON u.id = ec.user_id
+      WHERE u.id = $1
+    `, [uid]);
+    
+    if (res.rows.length > 0) {
+      return {
+        coins: res.rows[0].coins || 0,
+        gems: res.rows[0].gems || 0,
+        dice_skin: res.rows[0].dice_skin || 'default',
+        board_theme: res.rows[0].board_theme || 'default',
+        avatar: res.rows[0].avatar || 'default',
+      };
+    }
+  } catch (error) {
+    console.error(`Failed to fetch economy for ${uid}:`, error);
+  }
+  return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
+};
+
+// Helper: Reward players with coins based on game outcome
+const rewardPlayers = async (winnerUid: string, players: any[]) => {
+  try {
+    // Winner gets 100 coins, losers get 20 coins
+    const winnerReward = 100;
+    const participantReward = 20;
+
+    for (const p of players) {
+      const reward = p.uid === winnerUid ? winnerReward : participantReward;
+      await pool.query(`
+        UPDATE users 
+        SET coins = coins + $1
+        WHERE id = $2
+      `, [reward, p.uid]);
+      console.log(`🪙 Awarded ${reward} coins to ${p.name}`);
+    }
+  } catch (err) {
+    console.error("Failed to reward players:", err);
   }
 };
 
@@ -179,6 +240,12 @@ type Player = {
   bankrupt?: boolean; // Player is bankrupt (lost game but watching)
   disconnected?: boolean; // Player temporarily disconnected (can reconnect)
   wins?: number; // Total wins for this player
+  equippedItems?: {
+    dice_skin: string;
+    board_theme: string;
+    avatar: string;
+    effect?: string;
+  };
   inventory: {
     chanceCards: number[];
     communityChestCards: number[];
@@ -202,43 +269,12 @@ type Room = {
   gameStartTime?: number; // Track when game started for 20min win condition
   winner?: string; // UID of winner
   pendingCardOffers?: Record<string, CardOffer>;
+  statsUpdated?: boolean; // Prevent duplicate stats updates
+  minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
 };
 
 // In-memory rooms
-const rooms: Record<
-  string,
-  {
-    name: string;
-    players: Array<{
-      uid: string;
-      name: string;
-      identifier: string;
-      socketId: string;
-      money: number;
-      position: number;
-      isActive: boolean;
-      // add this to track cards like "Get Out of Jail Free" (only stored ids)
-      inCardDraw: boolean;
-      color?: string;
-      pendingJailDecision?: boolean;
-      surrendered?: boolean; // Player surrendered but watching
-      bankrupt?: boolean; // Player is bankrupt (lost game but watching)
-      disconnected?: boolean; // Player temporarily disconnected (can reconnect)
-      wins?: number; // Total wins for this player
-      inventory: {
-        chanceCards: number[];
-        communityChestCards: number[];
-        properties: number[];
-      };
-    }>;
-    maxPlayers: number;
-    status: "waiting" | "in-game" | "finished";
-    gameStartTime?: number; // Track when game started
-    minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
-    winner?: string; // UID of winner
-    pendingCardOffers?: Record<string, CardOffer>;
-  }
-> = {};
+const rooms: Record<string, Room> = {};
 
 // Game timer tracking
 const gameTimers: Record<string, NodeJS.Timeout> = {};
@@ -884,6 +920,21 @@ const endGame = async (roomName: string, winner: Player, reason: "last-standing"
   const room = rooms[roomName];
   if (!room) return;
 
+  // GUARD 1: Check if game already ended
+  if (room.status === "finished" && room.winner) {
+    console.log(`⚠️ Game already ended in ${roomName}, skipping duplicate endGame call`);
+    return;
+  }
+
+  // GUARD 2: Check if stats already updated for this game session
+  if (room.statsUpdated) {
+    console.log(`⚠️ Player stats already updated for ${roomName}, skipping`);
+    return;
+  }
+  
+  // Mark stats as being updated immediately to prevent race conditions
+  room.statsUpdated = true;
+
   const now = new Date().toISOString();
   
   // Calculate game duration
@@ -932,11 +983,20 @@ const endGame = async (roomName: string, winner: Player, reason: "last-standing"
   console.log(`⏱️ Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
   console.log(`📊 Data emitted to clients for ranking storage`);
 
-  // Update player stats in database
+  // Update player stats in database (WITH UNIQUE GAME ID)
+  // Use gameStartTime if available to ensure consistent ID across multiple calls
+  const gameTimestamp = room.gameStartTime || Date.now();
+  const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
+  console.log(`🎮 Updating stats with game ID: ${gameId}`);
+  
   await updatePlayerStats(
     { uid: winner.uid, name: winner.name },
-    room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered }))
+    room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })),
+    gameId
   );
+
+  // Award coins to winner and participants
+  await rewardPlayers(winner.uid, room.players);
 };
 
 /**
@@ -989,8 +1049,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Fetch player's wins from database
+    // Fetch player's wins and economy/cosmetics from database
     const playerWins = await fetchPlayerWins(user.uid);
+    const economyAndCosmetics = await fetchPlayerEconomy(user.uid);
 
     rooms[roomName] = {
       name: roomName,
@@ -1006,6 +1067,11 @@ io.on("connection", (socket) => {
           isActive: false,
           color: user.color || "",
           wins: playerWins,
+          equippedItems: {
+            dice_skin: economyAndCosmetics.dice_skin,
+            board_theme: economyAndCosmetics.board_theme,
+            avatar: economyAndCosmetics.avatar,
+          },
           inventory: {
             chanceCards: [],
             communityChestCards: [],
@@ -1036,6 +1102,15 @@ io.on("connection", (socket) => {
       // Reconnect the player
       disconnectedPlayer.disconnected = false;
       disconnectedPlayer.socketId = socket.id;
+
+      // Refresh their cosmetics returning from the shop
+      const economyAndCosmetics = await fetchPlayerEconomy(user.uid);
+      disconnectedPlayer.equippedItems = {
+        dice_skin: economyAndCosmetics.dice_skin,
+        board_theme: economyAndCosmetics.board_theme,
+        avatar: economyAndCosmetics.avatar,
+      };
+
       console.log(`🔌 Player ${disconnectedPlayer.name} reconnected to ${roomName}`);
       
       socket.join(roomName);
@@ -1068,8 +1143,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Fetch player's wins from database
+    // Fetch player's wins and economy/cosmetics from database
     const playerWins = await fetchPlayerWins(user.uid);
+    const economyAndCosmetics = await fetchPlayerEconomy(user.uid);
 
     room.players.push({
       uid: user.uid,
@@ -1082,6 +1158,11 @@ io.on("connection", (socket) => {
       isActive: false,
       color: user.color || "",
       wins: playerWins,
+      equippedItems: {
+        dice_skin: economyAndCosmetics.dice_skin,
+        board_theme: economyAndCosmetics.board_theme,
+        avatar: economyAndCosmetics.avatar,
+      },
       inventory: {
         chanceCards: [],
         communityChestCards: [],
@@ -2357,7 +2438,6 @@ io.on("connection", (socket) => {
     fromPlayer.money += request.money;
     toPlayer.money -= request.money;
     toPlayer.money += offer.money;
-
     console.log(`✅ Trade completed: ${fromPlayer.name} ↔ ${toPlayer.name}`);
 
     io.to(roomName).emit("trade-completed", {
@@ -2375,6 +2455,28 @@ io.on("connection", (socket) => {
 
   socket.on("decline-trade", ({ roomName, tradeId }) => {
     io.to(roomName).emit("trade-declined", { tradeId });
+  });
+
+  // ================= Update Player Cosmetics =================
+  socket.on("update-cosmetics", async ({ roomName, uid }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+
+    const player = room.players.find((p) => p.uid === uid);
+    if (player) {
+      // Assuming fetchPlayerEconomy is an async function available in this scope
+      // and returns an object with dice_skin, board_theme, avatar, effect properties.
+      // This function would typically interact with a database or external service.
+      const economyAndCosmetics = await fetchPlayerEconomy(uid); 
+      player.equippedItems = {
+        dice_skin: economyAndCosmetics.dice_skin,
+        board_theme: economyAndCosmetics.board_theme,
+        avatar: economyAndCosmetics.avatar,
+      };
+      
+      io.to(roomName).emit("update-rooms", rooms);
+      console.log(`✨ Player ${player.name} updated their cosmetics mid-game!`);
+    }
   });
 
 // ================= Sell Jail Card to Another Player =================
