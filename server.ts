@@ -235,6 +235,8 @@ type Player = {
   inCardDraw: boolean;
   isActive: boolean;
   color?: string;
+  isBot?: boolean;
+  botDifficulty?: "easy" | "medium" | "hard";
   pendingJailDecision?: boolean;
   surrendered?: boolean; // Player surrendered but watching
   bankrupt?: boolean; // Player is bankrupt (lost game but watching)
@@ -327,7 +329,7 @@ const createDefaultRooms = () => {
     rooms[roomName] = {
       name: roomName,
       players: [],
-      maxPlayers: 4,
+      maxPlayers: 8,
       status: "waiting",
     };
     console.log(`✅ Default room created: ${roomName}`);
@@ -1173,6 +1175,54 @@ io.on("connection", (socket) => {
     socket.join(roomName);
     emitRooms();
     socket.emit("room-joined", roomName);
+  });
+
+  // Add bot to room (only in waiting status)
+  socket.on("add-bot", ({ roomName, botDifficulty }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+    if (room.status !== "waiting") {
+      socket.emit("error", "Can only add bots before the game starts");
+      return;
+    }
+    if (room.players.length >= room.maxPlayers) {
+      socket.emit("error", "Room is full");
+      return;
+    }
+
+    const botId = `bot_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const botName = `Bot (${botDifficulty})`;
+
+    room.players.push({
+      uid: botId,
+      name: botName,
+      identifier: botId,
+      socketId: "bot",
+      money: 1500,
+      position: 0,
+      inCardDraw: false,
+      isActive: false,
+      color: "gray",
+      isBot: true,
+      botDifficulty: botDifficulty || "medium",
+      wins: 0,
+      inventory: {
+        chanceCards: [],
+        communityChestCards: [],
+        properties: [],
+      },
+    });
+
+    emitRooms();
+  });
+
+  // Remove bot from room
+  socket.on("remove-bot", ({ roomName, botUid }) => {
+    const room = rooms[roomName];
+    if (!room || room.status !== "waiting") return;
+    
+    room.players = room.players.filter((p) => p.uid !== botUid);
+    emitRooms();
   });
 
   // Leave room
@@ -2912,6 +2962,237 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     emitRooms();
   });
 });
+
+// ================= Bot Logic =================
+const processingBots = new Set<string>();
+
+const passBotTurn = (roomName: string, botUid: string) => {
+  const room = rooms[roomName];
+  if (!room) return;
+  
+  const currentIndex = room.players.findIndex(p => p.uid === botUid);
+  if (currentIndex === -1) return;
+  
+  let nextIndex = (currentIndex + 1) % room.players.length;
+  let loops = 0;
+  while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
+    nextIndex = (nextIndex + 1) % room.players.length;
+    loops++;
+  }
+  
+  room.players = room.players.map((p, i) => ({
+    ...p,
+    isActive: i === nextIndex
+  }));
+  
+  io.to(roomName).emit("next-turn", {
+    nextPlayerUid: room.players[nextIndex].uid,
+    nextPlayerIndex: nextIndex
+  });
+  
+  io.to(roomName).emit("update-rooms", rooms);
+};
+
+const playBotTurn = async (roomName: string, botUid: string) => {
+  const room = rooms[roomName];
+  if (!room || room.status !== "in-game") return;
+  
+  const player = room.players.find(p => p.uid === botUid);
+  if (!player || player.surrendered || player.bankrupt) return;
+
+  // Let bot think
+  await new Promise(res => setTimeout(res, 1500));
+  
+  if (!rooms[roomName] || rooms[roomName].status !== "in-game") return;
+
+  const dice = Math.floor(Math.random() * 6) + 1;
+  io.to(roomName).emit("dice-rolled", { uid: botUid, dice });
+
+  const oldPos = player.position;
+  let newPos = (player.position + dice) % 40;
+  
+  let sentToJail = false;
+  if (newPos === 30) {
+    const hasJailCard = player.inventory.chanceCards.includes(7) || player.inventory.communityChestCards.includes(5);
+    if (hasJailCard) {
+      player.inventory.chanceCards = player.inventory.chanceCards.filter(id => id !== 7);
+      player.inventory.communityChestCards = player.inventory.communityChestCards.filter(id => id !== 5);
+      io.to(roomName).emit("jail-card-used", {
+        uid: player.uid,
+        message: `${player.name} used a Get Out of Jail Free card!`
+      });
+    } else {
+      sentToJail = true;
+      newPos = 10;
+    }
+  }
+  
+  player.position = newPos;
+
+  if (!sentToJail && newPos < oldPos) {
+    io.to(roomName).emit("collect-money", { uid: botUid, reason: "dice" });
+    player.money += 200;
+  }
+
+  if (player.position === 4) player.money -= 200;
+  if (player.position === 38) player.money -= 100;
+
+  let isDrawingCard = false;
+  const chancePositions = [7, 22, 36];
+  const communityPositions = [2, 17, 33];
+  
+  if (chancePositions.includes(player.position)) {
+    isDrawingCard = true;
+    player.inCardDraw = true;
+    io.to(roomName).emit("before-draw", { type: "chance", uid: botUid });
+    setTimeout(() => {
+       if (!rooms[roomName]) return;
+       const cardId = drawCard(chanceDeck);
+       io.to(roomName).emit("draw-card", { type: "chance", uid: botUid, cardId });
+       setTimeout(() => {
+          if (!rooms[roomName]) return;
+          applyCardEffect(roomName, botUid, "chance", cardId);
+          const updatedPlayer = rooms[roomName].players.find(p => p.uid === botUid);
+          if (updatedPlayer && !updatedPlayer.inCardDraw) {
+            passBotTurn(roomName, botUid);
+          }
+       }, 2000);
+    }, 1500);
+  } else if (communityPositions.includes(player.position)) {
+    isDrawingCard = true;
+    player.inCardDraw = true;
+    io.to(roomName).emit("before-draw", { type: "community", uid: botUid });
+    setTimeout(() => {
+       if (!rooms[roomName]) return;
+       const cardId = drawCard(communityDeck);
+       io.to(roomName).emit("draw-card", { type: "community", uid: botUid, cardId });
+       setTimeout(() => {
+          if (!rooms[roomName]) return;
+          applyCardEffect(roomName, botUid, "community", cardId);
+          const updatedPlayer = rooms[roomName].players.find(p => p.uid === botUid);
+          if (updatedPlayer && !updatedPlayer.inCardDraw) {
+            passBotTurn(roomName, botUid);
+          }
+       }, 2000);
+    }, 1500);
+  }
+
+  if (!isDrawingCard) {
+    const rentResult = calculateRent(room, player.position, roomName, dice);
+    if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
+      if (player.money >= rentResult.rentAmount) {
+         player.money -= rentResult.rentAmount;
+         rentResult.owner.money += rentResult.rentAmount;
+         io.to(roomName).emit("rent-paid", {
+           fromUid: player.uid,
+           toUid: rentResult.owner.uid,
+           propertyIndex: player.position,
+           amount: rentResult.rentAmount,
+           hasHotel: rentResult.hasHotel,
+           hasMonopoly: rentResult.hasMonopoly,
+           isPartial: false,
+         });
+      } else {
+         const amountPaid = player.money;
+         player.money = 0;
+         player.bankrupt = true;
+         player.isActive = false;
+         rentResult.owner.money += amountPaid;
+         returnAssetsToBank(roomName, player);
+         io.to(roomName).emit("player-bankrupt", {
+             uid: player.uid,
+             name: player.name,
+             debtAmount: rentResult.rentAmount - amountPaid,
+             paidAmount: amountPaid,
+             ownerUid: rentResult.owner.uid,
+             ownerName: rentResult.owner.name,
+         });
+         const winCheck = checkWinCondition(roomName);
+         if (winCheck.hasWinner && winCheck.winner) {
+             endGame(roomName, winCheck.winner, "last-standing");
+         }
+      }
+    } else if (!rentResult.owner && propertyRentData[player.position]) {
+       const propertyInfo = propertyRentData[player.position];
+       const price = propertyInfo.originalPrice;
+       let willBuy = false;
+       if (player.money >= price) {
+         const diff = player.botDifficulty;
+         if (diff === "hard") willBuy = player.money > price + 100;
+         else if (diff === "medium") willBuy = player.money > price + 200 && Math.random() > 0.3;
+         else willBuy = Math.random() > 0.6;
+       }
+       if (willBuy) {
+         player.money -= price;
+         player.inventory.properties.push(player.position);
+         io.to(roomName).emit("property-bought", { uid: player.uid, propertyIndex: player.position, price });
+       }
+    }
+
+    io.to(roomName).emit("move-result", {
+      uid: botUid,
+      from: oldPos,
+      to: player.position,
+      money: player.money,
+      nextPlayerUid: room.players.find(p => p.isActive)?.uid || botUid,
+    });
+    
+    if (!player.bankrupt && (player.botDifficulty === "medium" || player.botDifficulty === "hard")) {
+       const monopolies: string[] = [];
+       for (const color in colorGroups) {
+          if (hasColorMonopoly(room, player.uid, color) && color !== "rail" && color !== "utility") {
+             monopolies.push(color);
+          }
+       }
+       if (monopolies.length > 0) {
+          const threshold = player.botDifficulty === "hard" ? 200 : 500;
+          if (player.money > threshold) {
+             for (const color of monopolies) {
+                const props = colorGroups[color];
+                for (const propIdx of props) {
+                   const houseCost = propIdx < 11 ? 50 : (propIdx < 21 ? 100 : (propIdx < 31 ? 150 : 200));
+                   if (player.money > threshold + houseCost) {
+                      if (!propertyBuildings[roomName]) propertyBuildings[roomName] = {};
+                      const currentLevel = propertyBuildings[roomName][propIdx] || 0;
+                      if (currentLevel < 4) {
+                         propertyBuildings[roomName][propIdx] = currentLevel + 1;
+                         player.money -= houseCost;
+                         io.to(roomName).emit("house-built", {
+                            uid: player.uid, propertyIndex: propIdx, houseCount: currentLevel + 1, hasHotel: false
+                         });
+                      } else if (currentLevel === 4) {
+                         propertyBuildings[roomName][propIdx] = 5;
+                         player.money -= houseCost;
+                         io.to(roomName).emit("hotel-built", { uid: player.uid, propertyIndex: propIdx, cost: houseCost });
+                      }
+                   }
+                }
+             }
+          }
+       }
+    }
+
+    passBotTurn(roomName, botUid);
+  }
+};
+
+setInterval(() => {
+  for (const roomName in rooms) {
+    const room = rooms[roomName];
+    if (room.status === "in-game") {
+      const activePlayer = room.players.find(p => p.isActive);
+      if (activePlayer && activePlayer.isBot) {
+        const botKey = `${roomName}_${activePlayer.uid}`;
+        if (!processingBots.has(botKey)) {
+          processingBots.add(botKey);
+          playBotTurn(roomName, activePlayer.uid).catch(console.error).finally(() => {
+            processingBots.delete(botKey);
+          });
+        }
+      }
+    }
+  }
+}, 1000);
 
 server.listen(PORT, () => {
   console.log(`✅ Socket.IO server running on port ${PORT}`);
