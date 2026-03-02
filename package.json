@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node ./dist/server.js",
-    "dev": "npx ts-node server.ts",
+    "dev": "npm run build && node ./dist/server.js",
     "postinstall": "npm run build"
   },
   "dependencies": {

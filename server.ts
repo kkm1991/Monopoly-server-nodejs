@@ -3,117 +3,29 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import dotenv from "dotenv";
-import { Pool } from 'pg';
 
 // Load environment variables
 dotenv.config({ path: '../monopoloy-project/.env.local' });
 
-const databaseUrl = process.env.DATABASE_URL?.includes('?') 
-  ? `${process.env.DATABASE_URL}&sslmode=require` 
-  : `${process.env.DATABASE_URL}?sslmode=require`;
-
-const pool = new Pool({
-  connectionString: databaseUrl,
-  ssl: { rejectUnauthorized: false }
-});
+import { updatePlayerStats, fetchPlayerWins, fetchPlayerEconomy, rewardPlayers } from './src/services/dbService.js';
 
 const app = express();
+const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000";
 
 // Client API URL for storing player stats
-const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000";
+// const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000"; // This line is a duplicate and can be removed if not intended. Keeping it as per original document structure.
 
 // ================= DATABASE / PERSISTENCE =================
 // Using client-side Neon PostgreSQL via API calls
 
-// Helper to update player stats via client API
-const updatePlayerStats = async (winner: any, players: any[], gameId?: string) => {
-  try {
-    const response = await fetch(`${CLIENT_API_URL}/api/player-stats`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ winner, players, gameId }),
-    });
-    if (!response.ok) {
-      console.error("Failed to update player stats:", await response.text());
-    } else {
-      const result = await response.json();
-      if (result.skipped) {
-        console.log(`⏭️ Player stats update skipped: ${result.message}`);
-      } else {
-        console.log("✅ Player stats updated in database");
-      }
-    }
-  } catch (error) {
-    console.error("❌ Error updating player stats:", error);
-  }
-};
-
-// Helper to fetch player wins from API
-const fetchPlayerWins = async (uid: string): Promise<number> => {
-  try {
-    const response = await fetch(`${CLIENT_API_URL}/api/player-stats?uid=${uid}`);
-    if (!response.ok) {
-      console.error(`Failed to fetch stats for ${uid}:`, await response.text());
-      return 0;
-    }
-    const data = await response.json();
-    return data.wins || 0;
-  } catch (error) {
-    console.error(`❌ Error fetching wins for ${uid}:`, error);
-    return 0;
-  }
-};
-
-// Helper: Fetch player's economy and cosmetics
-const fetchPlayerEconomy = async (uid: string) => {
-  try {
-    const res = await pool.query(`
-      SELECT u.coins, u.gems, ec.dice_skin, ec.board_theme, ec.avatar
-      FROM users u
-      LEFT JOIN equipped_cosmetics ec ON u.id = ec.user_id
-      WHERE u.id = $1
-    `, [uid]);
-    
-    if (res.rows.length > 0) {
-      return {
-        coins: res.rows[0].coins || 0,
-        gems: res.rows[0].gems || 0,
-        dice_skin: res.rows[0].dice_skin || 'default',
-        board_theme: res.rows[0].board_theme || 'default',
-        avatar: res.rows[0].avatar || 'default',
-      };
-    }
-  } catch (error) {
-    console.error(`Failed to fetch economy for ${uid}:`, error);
-  }
-  return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
-};
-
-// Helper: Reward players with coins based on game outcome
-const rewardPlayers = async (winnerUid: string, players: any[]) => {
-  try {
-    // Winner gets 100 coins, losers get 20 coins
-    const winnerReward = 100;
-    const participantReward = 20;
-
-    for (const p of players) {
-      const reward = p.uid === winnerUid ? winnerReward : participantReward;
-      await pool.query(`
-        UPDATE users 
-        SET coins = coins + $1
-        WHERE id = $2
-      `, [reward, p.uid]);
-      console.log(`🪙 Awarded ${reward} coins to ${p.name}`);
-    }
-  } catch (err) {
-    console.error("Failed to reward players:", err);
-  }
-};
-
 // API endpoint to get player rankings (for dashboard) - proxy to client API
 app.get("/api/rankings", async (req, res) => {
   try {
-    const response = await fetch(`${CLIENT_API_URL}/api/rankings`);
+    const response = await fetch(`${CLIENT_API_URL}/api/rankings`, {
+      headers: {
+        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+      }
+    });
     if (!response.ok) throw new Error("Failed to fetch from client API");
     const data = await response.json();
     res.json(data);
@@ -127,7 +39,11 @@ app.get("/api/rankings", async (req, res) => {
 app.get("/api/player/:uid/stats", async (req, res) => {
   const { uid } = req.params;
   try {
-    const response = await fetch(`${CLIENT_API_URL}/api/rankings`);
+    const response = await fetch(`${CLIENT_API_URL}/api/rankings`, {
+      headers: {
+        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+      }
+    });
     if (!response.ok) throw new Error("Failed to fetch from client API");
     const data = await response.json();
     const player = data.rankings?.find((r: any) => r.uid === uid);
@@ -211,6 +127,9 @@ const io = new Server(server, {
   perMessageDeflate: false // Disable compression to reduce overhead
 });
 
+import { initSocketService, broadcastToRoom } from './src/services/socketService.js';
+initSocketService(io);
+
 const chanceDeck = [...Array(16)].map((_, i) => i + 1);
 const communityDeck = [...Array(16)].map((_, i) => i + 1);
 const drawCard = (deck: number[]) => {
@@ -225,55 +144,8 @@ const drawCard = (deck: number[]) => {
 };
 
 // Chance (ကံစမ်းမဲ) ကတ်များ၏ Logic
-type Player = {
-  uid: string;
-  name: string;
-  identifier: string;
-  socketId: string;
-  money: number;
-  position: number;
-  inCardDraw: boolean;
-  isActive: boolean;
-  color?: string;
-  isBot?: boolean;
-  botDifficulty?: "easy" | "medium" | "hard";
-  pendingJailDecision?: boolean;
-  surrendered?: boolean; // Player surrendered but watching
-  bankrupt?: boolean; // Player is bankrupt (lost game but watching)
-  disconnected?: boolean; // Player temporarily disconnected (can reconnect)
-  wins?: number; // Total wins for this player
-  equippedItems?: {
-    dice_skin: string;
-    board_theme: string;
-    avatar: string;
-    effect?: string;
-  };
-  inventory: {
-    chanceCards: number[];
-    communityChestCards: number[];
-    properties: number[];
-  };
-};
-
-type CardOffer = {
-  offerId: string;
-  fromUid: string;
-  toUid: string;
-  cardType: 'chance' | 'community';
-  price: number;
-};
-
-type Room = {
-  name: string;
-  players: Player[];
-  maxPlayers: number;
-  status: "waiting" | "in-game" | "finished";
-  gameStartTime?: number; // Track when game started for 20min win condition
-  winner?: string; // UID of winner
-  pendingCardOffers?: Record<string, CardOffer>;
-  statsUpdated?: boolean; // Prevent duplicate stats updates
-  minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
-};
+import { propertyRentData, colorGroups } from './src/utils/constants.js';
+import { Player, CardOffer, Room } from './src/types/index.js';
 
 // In-memory rooms
 const rooms: Record<string, Room> = {};
@@ -354,132 +226,17 @@ const activeAuctions: Record<string, {
 // Pending property purchases tracking - prevents race conditions
 const pendingPurchases: Record<string, Set<number>> = {};
 
-// Property rent data with house levels and original purchase prices
-const propertyRentData: Record<number, { rent: number; houseRents: number[]; hotelRent: number; color: string; originalPrice: number }> = {
-  // Brown properties
-  1: { rent: 4, houseRents: [20, 60, 180, 320], hotelRent: 450, color: "#955436", originalPrice: 60 },
-  3: { rent: 6, houseRents: [30, 90, 270, 400], hotelRent: 550, color: "#955436", originalPrice: 80 },
-  // Light Blue properties
-  6: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA", originalPrice: 100 },
-  8: { rent: 8, houseRents: [40, 100, 300, 450], hotelRent: 600, color: "#AAE0FA", originalPrice: 100 },
-  9: { rent: 10, houseRents: [50, 150, 450, 625], hotelRent: 750, color: "#AAE0FA", originalPrice: 120 },
-  // Pink properties
-  11: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96", originalPrice: 140 },
-  13: { rent: 12, houseRents: [60, 180, 500, 700], hotelRent: 900, color: "#D93A96", originalPrice: 140 },
-  14: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#D93A96", originalPrice: 160 },
-  // Orange properties
-  16: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D", originalPrice: 180 },
-  18: { rent: 14, houseRents: [70, 200, 550, 750], hotelRent: 950, color: "#F7941D", originalPrice: 180 },
-  19: { rent: 16, houseRents: [80, 220, 600, 800], hotelRent: 1000, color: "#F7941D", originalPrice: 200 },
-  // Red properties
-  21: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24", originalPrice: 220 },
-  23: { rent: 18, houseRents: [90, 250, 700, 875], hotelRent: 1050, color: "#ED1B24", originalPrice: 220 },
-  24: { rent: 20, houseRents: [100, 300, 750, 925], hotelRent: 1100, color: "#ED1B24", originalPrice: 240 },
-  // Yellow properties
-  26: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200", originalPrice: 260 },
-  27: { rent: 22, houseRents: [110, 330, 800, 975], hotelRent: 1150, color: "#FEF200", originalPrice: 260 },
-  29: { rent: 24, houseRents: [120, 360, 850, 1025], hotelRent: 1200, color: "#FEF200", originalPrice: 280 },
-  // Green properties
-  31: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A", originalPrice: 300 },
-  32: { rent: 26, houseRents: [130, 390, 900, 1100], hotelRent: 1275, color: "#1FB25A", originalPrice: 300 },
-  34: { rent: 28, houseRents: [150, 450, 1000, 1200], hotelRent: 1400, color: "#1FB25A", originalPrice: 320 },
-  // Dark Blue properties
-  37: { rent: 35, houseRents: [175, 500, 1100, 1300], hotelRent: 1500, color: "#0072BB", originalPrice: 350 },
-  39: { rent: 50, houseRents: [200, 600, 1400, 1700], hotelRent: 2000, color: "#0072BB", originalPrice: 400 },
-  // Railroads
-  5: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
-  15: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
-  25: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
-  35: { rent: 25, houseRents: [25, 25, 25, 25], hotelRent: 25, color: "rail", originalPrice: 200 },
-  // Utilities
-  12: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility", originalPrice: 150 }, // Electric
-  28: { rent: 0, houseRents: [0, 0, 0, 0], hotelRent: 0, color: "utility", originalPrice: 150 }, // Water
-};
+// Animation tracking - tracks which players are currently animating
+const animatingPlayers: Record<string, Set<string>> = {};
 
-// Color groups for monopoly check
-const colorGroups: Record<string, number[]> = {
-  "#955436": [1, 3], // Brown
-  "#AAE0FA": [6, 8, 9], // Light Blue
-  "#D93A96": [11, 13, 14], // Pink
-  "#F7941D": [16, 18, 19], // Orange
-  "#ED1B24": [21, 23, 24], // Red
-  "#FEF200": [26, 27, 29], // Yellow
-  "#1FB25A": [31, 32, 34], // Green
-  "#0072BB": [37, 39], // Dark Blue
-  "rail": [5, 15, 25, 35], // Railroads
-  "utility": [12, 28], // Utilities
-};
+// Turn cooldown tracking - prevents immediate re-triggering after turn changes
+const turnCooldowns: Record<string, number> = {};
 
-// Helper function to find property owner
-const findPropertyOwner = (room: Room, propertyIndex: number): Player | null => {
-  return room.players.find(p => p.inventory.properties.includes(propertyIndex)) || null;
-};
 
-// Helper function to check if player has monopoly (all properties of same color)
-const hasColorMonopoly = (room: Room, playerUid: string, color: string): boolean => {
-  const propertiesInColor = colorGroups[color];
-  if (!propertiesInColor) return false;
-  
-  const player = room.players.find(p => p.uid === playerUid);
-  if (!player) return false;
-  
-  return propertiesInColor.every(idx => player.inventory.properties.includes(idx));
-};
 
-// Helper function to calculate rent
-const calculateRent = (
-  room: Room, 
-  propertyIndex: number, 
-  roomName: string,
-  diceRoll: number = 0
-): { rentAmount: number; owner: Player | null; hasMonopoly: boolean; hasHotel: boolean } => {
-  const rentInfo = propertyRentData[propertyIndex];
-  if (!rentInfo) {
-    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
-  }
-  
-  const owner = findPropertyOwner(room, propertyIndex);
-  if (!owner) {
-    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
-  }
-  
-  const hasMonopoly = hasColorMonopoly(room, owner.uid, rentInfo.color);
-  const buildingLevel = propertyBuildings[roomName]?.[propertyIndex] || 0;
-  const hasHotel = buildingLevel === 5;
-  const houseCount = buildingLevel > 0 && buildingLevel < 5 ? buildingLevel : 0;
-  
-  // Calculate base rent based on building level
-  let baseRent = rentInfo.rent;
-  if (hasHotel) {
-    baseRent = rentInfo.hotelRent;
-  } else if (houseCount > 0) {
-    baseRent = rentInfo.houseRents[houseCount - 1];
-  }
-  
-  // Railroad rent calculation (increases with more railroads owned)
-  if (rentInfo.color === "rail") {
-    const railroadsOwned = owner.inventory.properties.filter(p => 
-      [5, 15, 25, 35].includes(p)
-    ).length;
-    // Rent doubles for each additional railroad: 25, 50, 100, 200
-    baseRent = 25 * Math.pow(2, railroadsOwned - 1);
-  }
-  
-  // Utility rent calculation (4x dice roll for 1, 10x for both)
-  if (rentInfo.color === "utility") {
-    const utilitiesOwned = owner.inventory.properties.filter(p => 
-      [12, 28].includes(p)
-    ).length;
-    // If has monopoly (both utilities), rent is 10x dice, otherwise 4x dice
-    const multiplier = hasMonopoly ? 10 : 4;
-    baseRent = multiplier * diceRoll;
-  }
-  
-  // Apply monopoly multiplier for regular properties (2x)
-  const rentAmount = (hasMonopoly && rentInfo.color !== "utility") ? baseRent * 2 : baseRent;
-  
-  return { rentAmount, owner, hasMonopoly, hasHotel };
-};
+
+import { calculateRent, checkWinCondition, hasColorMonopoly, nearestCell, nearestUtility, railroads, utilities, findPropertyOwner, endGame, startGameTimer } from './src/services/gameLogic.js';
+import { registerTradeHandlers } from './src/controllers/tradeController.js';
 
 const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
   1: (p, room) => {
@@ -836,27 +593,7 @@ const applyCardEffect = (
   io.to(roomName).emit("update-rooms", rooms);
 };
 
-//  text: "အနီးဆုံး ဘူတာ/ဆိပ်ကမ်း သို့ သွားပါ။",
-const railroads = [5, 15, 25, 35];
-const nearestCell = (current: number) => {
-  for (const r of railroads) {
-    if (r > current) {
-      return r;
-    }
-  }
-  return railroads[0]; // wrap around
-};
 
-//  text: "အနီးဆုံး လျှပ်စစ်ဌာန သို့မဟုတ် ရေပေးဝေရေးဌာနသို့ သွားပါ။",
-const utilities = [12, 28];
-const nearestUtility = (current: number) => {
-  for (const u of utilities) {
-    if (u > current) {
-      return u;
-    }
-  }
-  return utilities[0]; // wrap around
-};
 
 // Helper function to return player assets to bank
 const returnAssetsToBank = (roomName: string, player: Player) => {
@@ -895,145 +632,9 @@ const returnAssetsToBank = (roomName: string, player: Player) => {
   return { properties: propertiesToReturn, chanceCards, communityCards };
 };
 
-/**
- * Check if game should end (only one active player remaining)
- * After minimum duration (1 minute), if only one player remains, they win
- */
-const checkWinCondition = (roomName: string): { hasWinner: boolean; winner?: Player } => {
-  const room = rooms[roomName];
-  if (!room || room.status !== "in-game") return { hasWinner: false };
 
-  // Only check for winner after minimum duration is met
-  if (!room.minDurationMet) return { hasWinner: false };
 
-  // Check if only one active (non-surrendered, non-bankrupt) player remains
-  const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
-  if (activePlayers.length === 1) {
-    return { hasWinner: true, winner: activePlayers[0] };
-  }
 
-  return { hasWinner: false };
-};
-
-/**
- * End game and declare winner
- */
-const endGame = async (roomName: string, winner: Player, reason: "last-standing" | "time-limit") => {
-  const room = rooms[roomName];
-  if (!room) return;
-
-  // GUARD 1: Check if game already ended
-  if (room.status === "finished" && room.winner) {
-    console.log(`⚠️ Game already ended in ${roomName}, skipping duplicate endGame call`);
-    return;
-  }
-
-  // GUARD 2: Check if stats already updated for this game session
-  if (room.statsUpdated) {
-    console.log(`⚠️ Player stats already updated for ${roomName}, skipping`);
-    return;
-  }
-  
-  // Mark stats as being updated immediately to prevent race conditions
-  room.statsUpdated = true;
-
-  const now = new Date().toISOString();
-  
-  // Calculate game duration
-  const gameStartTime = room.gameStartTime || Date.now();
-  const gameDurationSeconds = Math.floor((Date.now() - gameStartTime) / 1000);
-
-  // Update room status
-  room.status = "finished";
-  room.winner = winner.uid;
-
-  // Clear game timer if exists
-  if (gameTimers[roomName]) {
-    clearTimeout(gameTimers[roomName]);
-    delete gameTimers[roomName];
-  }
-
-  // Prepare player data with final stats
-  const playerData = room.players.map(p => ({
-    uid: p.uid,
-    name: p.name,
-    money: p.money,
-    position: p.position,
-    properties: p.inventory.properties.length,
-    surrendered: p.surrendered || false,
-    isWinner: p.uid === winner.uid,
-  }));
-
-  // Broadcast game end with comprehensive data for rankings
-  io.to(roomName).emit("game-ended", {
-    winner: {
-      uid: winner.uid,
-      name: winner.name,
-      money: winner.money,
-      properties: winner.inventory.properties.length,
-    },
-    reason,
-    roomName,
-    gameDurationSeconds,
-    minDurationMet: room.minDurationMet || false,
-    totalPlayers: room.players.length,
-    players: playerData,
-    endedAt: now,
-  });
-
-  console.log(`🏆 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
-  console.log(`⏱️ Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
-  console.log(`📊 Data emitted to clients for ranking storage`);
-
-  // Update player stats in database (WITH UNIQUE GAME ID)
-  // Use gameStartTime if available to ensure consistent ID across multiple calls
-  const gameTimestamp = room.gameStartTime || Date.now();
-  const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
-  console.log(`🎮 Updating stats with game ID: ${gameId}`);
-  
-  await updatePlayerStats(
-    { uid: winner.uid, name: winner.name },
-    room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })),
-    gameId
-  );
-
-  // Award coins to winner and participants
-  await rewardPlayers(winner.uid, room.players);
-};
-
-/**
- * Start 20-minute game timer
- */
-const startGameTimer = (roomName: string) => {
-  const room = rooms[roomName];
-  if (!room) return;
-
-  // Set game start time
-  room.gameStartTime = Date.now();
-
-  // Clear any existing timer
-  if (gameTimers[roomName]) {
-    clearTimeout(gameTimers[roomName]);
-  }
-
-  // Set 1-minute minimum duration timer (60000ms)
-  // Games lasting less than 1 minute don't qualify for rankings
-  gameTimers[roomName] = setTimeout(() => {
-    const room = rooms[roomName];
-    if (!room || room.status !== "in-game") return;
-    
-    room.minDurationMet = true; // Mark that minimum duration is met
-    console.log(`⏱️ Minimum 1-minute duration met for ${roomName} - games now qualify for rankings`);
-    
-    // Check if only one player left after minimum duration
-    const activePlayers = room.players.filter(p => !p.surrendered);
-    if (activePlayers.length === 1) {
-      endGame(roomName, activePlayers[0], "last-standing");
-    }
-  }, 1 * 60 * 1000); // 1 minute minimum
-
-  console.log(`⏱️ 1-minute minimum duration timer started for ${roomName}`);
-};
 
 io.on("connection", (socket) => {
   // Send all rooms on new connection
@@ -1219,10 +820,33 @@ io.on("connection", (socket) => {
   // Remove bot from room
   socket.on("remove-bot", ({ roomName, botUid }) => {
     const room = rooms[roomName];
-    if (!room || room.status !== "waiting") return;
-    
+    if (!room) return;
+
+    // Remove bot from processing set if it's currently taking a turn
+    const botKey = `${roomName}_${botUid}`;
+    if (processingBots.has(botKey)) {
+      processingBots.delete(botKey);
+    }
+
+    // Pass turn to next player if the bot was active
+    const botPlayer = room.players.find((p) => p.uid === botUid);
+    if (botPlayer && botPlayer.isActive && room.status === "in-game") {
+      passBotTurn(roomName, botUid);
+    }
+
     room.players = room.players.filter((p) => p.uid !== botUid);
-    emitRooms();
+    io.to(roomName).emit("update-rooms", rooms);
+    
+    // Check if the game needs to end after bot removal
+    if (room.status === "in-game") {
+      const activeRealPlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
+      if (activeRealPlayers.length <= 1) {
+        const winCheck = checkWinCondition(roomName);
+        if (winCheck.hasWinner && winCheck.winner) {
+          endGame(roomName, winCheck.winner, "last-standing");
+        }
+      }
+    }
   });
 
   // Leave room
@@ -1495,7 +1119,25 @@ io.on("connection", (socket) => {
     emitRooms();
   });
 
-  // ================= Start Game =================
+  // ================= Animation Complete Handler =================
+socket.on("animation-complete", ({ roomName, uid }) => {
+  if (!animatingPlayers[roomName]) {
+    animatingPlayers[roomName] = new Set();
+  }
+  animatingPlayers[roomName].delete(uid);
+  console.log(`✅ Animation complete for player ${uid} in ${roomName}`);
+});
+
+// ================= Animation Start Handler =================
+socket.on("animation-start", ({ roomName, uid }) => {
+  if (!animatingPlayers[roomName]) {
+    animatingPlayers[roomName] = new Set();
+  }
+  animatingPlayers[roomName].add(uid);
+  console.log(`🎬 Animation started for player ${uid} in ${roomName}`);
+});
+
+
   socket.on("start-game", async ({ roomName }) => {
     const room = rooms[roomName];
     if (!room || room.players.length < 2) {
@@ -2529,221 +2171,7 @@ io.on("connection", (socket) => {
     }
   });
 
-// ================= Sell Jail Card to Another Player =================
-  // Store pending card sale offers within each room for persistence
-  type CardOffer = {
-    offerId: string;
-    fromUid: string;
-    toUid: string;
-    cardType: 'chance' | 'community';
-    price: number;
-  };
-
-  // Send card sale offer to target player
-  socket.on("sell-jail-card", ({ roomName, fromUid, toUid, cardType, price }) => {
-    const room = rooms[roomName];
-    if (!room) {
-      console.log(`❌ sell-jail-card: Room ${roomName} not found`);
-      return;
-    }
-
-    const fromPlayer = room.players.find((p) => p.uid === fromUid);
-    const toPlayer = room.players.find((p) => p.uid === toUid);
-    
-    if (!fromPlayer || !toPlayer) {
-      console.log(`❌ sell-jail-card: Player not found`, { fromUid, toUid, players: room.players.map(p => p.uid) });
-      socket.emit("error", "Player not found");
-      return;
-    }
-
-    // Check if target player has enough money
-    if (toPlayer.money < price) {
-      socket.emit("error", `${toPlayer.name} doesn't have enough money`);
-      return;
-    }
-
-    // Check if seller has the card
-    let hasCard = false;
-    if (cardType === 'chance') {
-      hasCard = fromPlayer.inventory.chanceCards.some((id: number) => id === 7);
-    } else {
-      hasCard = fromPlayer.inventory.communityChestCards.some((id: number) => id === 5);
-    }
-
-    if (!hasCard) {
-      socket.emit("error", `You don't have a ${cardType} jail card to sell`);
-      return;
-    }
-
-    // Create offer and store in room for persistence
-    const offerId = `card-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    if (!room.pendingCardOffers) {
-      room.pendingCardOffers = {};
-    }
-    room.pendingCardOffers[offerId] = {
-      offerId,
-      fromUid,
-      toUid,
-      cardType,
-      price,
-    };
-
-    console.log(`🎴 ${fromPlayer.name} offered ${cardType} jail card to ${toPlayer.name} for $${price}`);
-    console.log(`📋 Current offers in room:`, Object.keys(room.pendingCardOffers));
-
-    // Send offer to target player
-    io.to(roomName).emit("jail-card-offer-received", {
-      offerId,
-      fromUid,
-      fromName: fromPlayer.name,
-      toUid,
-      cardType,
-      price,
-    });
-
-    // Notify seller
-    socket.emit("jail-card-offer-sent", {
-      offerId,
-      toName: toPlayer.name,
-      cardType,
-      price,
-    });
-  });
-
-  // Accept jail card offer
-  socket.on("accept-jail-card-offer", ({ roomName, offerId }) => {
-    console.log(`🎴 accept-jail-card-offer received: roomName=${roomName}, offerId=${offerId}`);
-    
-    const room = rooms[roomName];
-    if (!room) {
-      console.log(`❌ Room ${roomName} not found. Available rooms:`, Object.keys(rooms));
-      socket.emit("error", "Room not found");
-      return;
-    }
-    
-    const roomOffers = room.pendingCardOffers || {};
-    console.log(`📋 Current pending offers in room:`, Object.keys(roomOffers));
-    
-    const offer = roomOffers[offerId];
-    if (!offer) {
-      console.log(`❌ Offer ${offerId} not found in room ${roomName}`);
-      socket.emit("error", "Offer not found or expired");
-      return;
-    }
-    console.log(`✅ Offer found:`, offer);
-    console.log(`✅ Room found: ${roomName} with ${room.players.length} players`);
-
-    const fromPlayer = room.players.find((p) => p.uid === offer.fromUid);
-    const toPlayer = room.players.find((p) => p.uid === offer.toUid);
-
-    console.log(`👤 Looking for fromPlayer ${offer.fromUid}:`, fromPlayer ? "found" : "NOT FOUND");
-    console.log(`👤 Looking for toPlayer ${offer.toUid}:`, toPlayer ? "found" : "NOT FOUND");
-    console.log(`👥 Room players:`, room.players.map(p => ({ uid: p.uid, name: p.name })));
-
-    if (!fromPlayer || !toPlayer) {
-      socket.emit("error", "Player not found");
-      return;
-    }
-
-    // Check money again
-    if (toPlayer.money < offer.price) {
-      socket.emit("error", "Not enough money to accept offer");
-      delete room.pendingCardOffers![offerId];
-      io.to(roomName).emit("jail-card-offer-declined", { offerId, reason: "Not enough money" });
-      return;
-    }
-
-    // Check if seller still has the card
-    let cardId: number | null = null;
-    if (offer.cardType === 'chance') {
-      const idx = fromPlayer.inventory.chanceCards.findIndex((id: number) => id === 7);
-      if (idx > -1) {
-        const removed = fromPlayer.inventory.chanceCards.splice(idx, 1);
-        cardId = removed[0];
-        console.log(`🎴 Removed chance card 7 from ${fromPlayer.name} at index ${idx}, cardId: ${cardId}`);
-      } else {
-        console.log(`❌ Chance card 7 not found in ${fromPlayer.name}'s inventory:`, fromPlayer.inventory.chanceCards);
-      }
-    } else {
-      const idx = fromPlayer.inventory.communityChestCards.findIndex((id: number) => id === 5);
-      if (idx > -1) {
-        const removed = fromPlayer.inventory.communityChestCards.splice(idx, 1);
-        cardId = removed[0];
-        console.log(`🎴 Removed community card 5 from ${fromPlayer.name} at index ${idx}, cardId: ${cardId}`);
-      } else {
-        console.log(`❌ Community card 5 not found in ${fromPlayer.name}'s inventory:`, fromPlayer.inventory.communityChestCards);
-      }
-    }
-
-    if (cardId === null || cardId === undefined) {
-      socket.emit("error", "Seller no longer has the card");
-      delete room.pendingCardOffers![offerId];
-      io.to(roomName).emit("jail-card-offer-declined", { offerId, reason: "Card no longer available" });
-      return;
-    }
-
-    // Transfer money
-    fromPlayer.money += offer.price;
-    toPlayer.money -= offer.price;
-
-    // Transfer card - ensure inventory arrays are initialized
-    if (!toPlayer.inventory.chanceCards) {
-      toPlayer.inventory.chanceCards = [];
-    }
-    if (!toPlayer.inventory.communityChestCards) {
-      toPlayer.inventory.communityChestCards = [];
-    }
-
-    if (offer.cardType === 'chance') {
-      toPlayer.inventory.chanceCards.push(cardId);
-      console.log(`✅ Transferred chance card ${cardId} to ${toPlayer.name}. New inventory:`, toPlayer.inventory.chanceCards);
-    } else {
-      toPlayer.inventory.communityChestCards.push(cardId);
-      console.log(`✅ Transferred community card ${cardId} to ${toPlayer.name}. New inventory:`, toPlayer.inventory.communityChestCards);
-    }
-
-    console.log(`✅ ${toPlayer.name} accepted ${offer.cardType} jail card from ${fromPlayer.name} for $${offer.price}`);
-
-    // Notify all players
-    io.to(roomName).emit("jail-card-sold", {
-      offerId,
-      fromUid: offer.fromUid,
-      toUid: offer.toUid,
-      cardType: offer.cardType,
-      cardId, // Include the actual card ID
-      price: offer.price,
-      fromName: fromPlayer.name,
-      toName: toPlayer.name,
-    });
-
-    delete room.pendingCardOffers![offerId];
-    io.to(roomName).emit("update-rooms", rooms);
-  });
-
-  // Decline jail card offer
-  socket.on("decline-jail-card-offer", ({ roomName, offerId }) => {
-    const room = rooms[roomName];
-    if (!room) return;
-    
-    const roomOffers = room.pendingCardOffers || {};
-    const offer = roomOffers[offerId];
-    if (!offer) return;
-
-    const fromPlayer = room.players.find((p) => p.uid === offer.fromUid);
-
-    console.log(`❌ ${offer.cardType} jail card offer declined`);
-
-    io.to(roomName).emit("jail-card-offer-declined", {
-      offerId,
-      fromUid: offer.fromUid,
-      toUid: offer.toUid,
-      fromName: fromPlayer?.name,
-      cardType: offer.cardType,
-      price: offer.price,
-    });
-
-    delete room.pendingCardOffers![offerId];
-  });
+  registerTradeHandlers(socket);
 
   // ================= VOICE FEATURES =================
 
@@ -2966,9 +2394,35 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
 // ================= Bot Logic =================
 const processingBots = new Set<string>();
 
-const passBotTurn = (roomName: string, botUid: string) => {
-  const room = rooms[roomName];
+const passBotTurn = async (roomName: string, botUid: string) => {
+  // Always get fresh room reference
+  let room = rooms[roomName];
   if (!room) return;
+  
+  // Wait for bot's own animation to complete
+  const maxWaitTime = 10000; // Max 10 seconds wait
+  const startTime = Date.now();
+  
+  while (animatingPlayers[roomName]?.has(botUid) && (Date.now() - startTime) < maxWaitTime) {
+    await new Promise(res => setTimeout(res, 200));
+    // Refresh room reference in case it changed
+    room = rooms[roomName];
+    if (!room) return;
+  }
+  
+  // Clear animating flag (in case timeout reached or client never sent complete)
+  animatingPlayers[roomName]?.delete(botUid);
+  
+  // Give a small buffer after animation completes
+  await new Promise(res => setTimeout(res, 500));
+  
+  // Get fresh room reference again
+  room = rooms[roomName];
+  if (!room) return;
+  
+  // Debug: Log bot position before turn change
+  const botPlayer = room.players.find(p => p.uid === botUid);
+  console.log(`🔄 passBotTurn: Bot ${botPlayer?.name} position before turn change: ${botPlayer?.position}`);
   
   const currentIndex = room.players.findIndex(p => p.uid === botUid);
   if (currentIndex === -1) return;
@@ -2980,10 +2434,18 @@ const passBotTurn = (roomName: string, botUid: string) => {
     loops++;
   }
   
+  // Update isActive for all players using fresh data
   room.players = room.players.map((p, i) => ({
     ...p,
     isActive: i === nextIndex
   }));
+  
+  // Debug: Log bot position after mapping
+  const botPlayerAfter = room.players.find(p => p.uid === botUid);
+  console.log(`🔄 passBotTurn: Bot ${botPlayerAfter?.name} position after mapping: ${botPlayerAfter?.position}`);
+  
+  // Set a cooldown for the next player to prevent immediate re-triggering
+  turnCooldowns[roomName] = Date.now() + 3000; // 3 second cooldown
   
   io.to(roomName).emit("next-turn", {
     nextPlayerUid: room.players[nextIndex].uid,
@@ -2991,25 +2453,55 @@ const passBotTurn = (roomName: string, botUid: string) => {
   });
   
   io.to(roomName).emit("update-rooms", rooms);
+  
+  // Debug: Verify rooms data after emit
+  const verifyBot = rooms[roomName]?.players.find(p => p.uid === botUid);
+  console.log(`🔄 passBotTurn: Bot ${verifyBot?.name} position in rooms after emit: ${verifyBot?.position}`);
 };
 
 const playBotTurn = async (roomName: string, botUid: string) => {
-  const room = rooms[roomName];
+  // Check cooldown at the very start
+  const cooldownEnd = turnCooldowns[roomName] || 0;
+  if (Date.now() < cooldownEnd) {
+    console.log(`⏳ playBotTurn: Bot ${botUid} blocked by cooldown, waiting...`);
+    return;
+  }
+  
+  let room = rooms[roomName];
   if (!room || room.status !== "in-game") return;
   
-  const player = room.players.find(p => p.uid === botUid);
-  if (!player || player.surrendered || player.bankrupt) return;
+  let player = room.players.find(p => p.uid === botUid);
+  if (!player || player.surrendered || player.bankrupt || !player.isActive) return;
+
+  // Let bot think
+  await new Promise(res => setTimeout(res, 1500));
+  
+  // Verify room/player states again after awaiting
+  if (!rooms[roomName] || rooms[roomName].status !== "in-game") return;
+  const recheckedPlayer = rooms[roomName].players.find(p => p.uid === botUid);
+  if (!recheckedPlayer || !recheckedPlayer.isActive) return;
 
   // Let bot think
   await new Promise(res => setTimeout(res, 1500));
   
   if (!rooms[roomName] || rooms[roomName].status !== "in-game") return;
+  
+  // CRITICAL: Re-fetch player reference to ensure it's not stale
+  // (passBotTurn may have recreated player objects via .map())
+  const freshPlayer = rooms[roomName].players.find(p => p.uid === botUid);
+  if (!freshPlayer) return;
+  player = freshPlayer;
+  
+  // Also refresh room reference to ensure it has latest player data
+  room = rooms[roomName];
 
   const dice = Math.floor(Math.random() * 6) + 1;
   io.to(roomName).emit("dice-rolled", { uid: botUid, dice });
 
   const oldPos = player.position;
   let newPos = (player.position + dice) % 40;
+  
+  console.log(`🎲 playBotTurn: ${player.name} rolling ${dice}, moving from ${oldPos} to ${newPos}`);
   
   let sentToJail = false;
   if (newPos === 30) {
@@ -3028,6 +2520,8 @@ const playBotTurn = async (roomName: string, botUid: string) => {
   }
   
   player.position = newPos;
+  
+  console.log(`📍 playBotTurn: ${player.name} position set to ${player.position}, rooms data: ${rooms[roomName]?.players.find(p => p.uid === botUid)?.position}`);
 
   if (!sentToJail && newPos < oldPos) {
     io.to(roomName).emit("collect-money", { uid: botUid, reason: "dice" });
@@ -3044,6 +2538,11 @@ const playBotTurn = async (roomName: string, botUid: string) => {
   if (chancePositions.includes(player.position)) {
     isDrawingCard = true;
     player.inCardDraw = true;
+    // Keep bot in processing state during card draw
+    const botKey = `${roomName}_${botUid}`;
+    processingBots.add(botKey);
+    // Set cooldown now to prevent interval from triggering again before turn passes
+    turnCooldowns[roomName] = Date.now() + 5000;
     io.to(roomName).emit("before-draw", { type: "chance", uid: botUid });
     setTimeout(() => {
        if (!rooms[roomName]) return;
@@ -3051,16 +2550,25 @@ const playBotTurn = async (roomName: string, botUid: string) => {
        io.to(roomName).emit("draw-card", { type: "chance", uid: botUid, cardId });
        setTimeout(() => {
           if (!rooms[roomName]) return;
+          // Notify client that animation is starting BEFORE applying effect
+          io.to(roomName).emit("animation-start", { roomName, uid: botUid });
           applyCardEffect(roomName, botUid, "chance", cardId);
           const updatedPlayer = rooms[roomName].players.find(p => p.uid === botUid);
           if (updatedPlayer && !updatedPlayer.inCardDraw) {
             passBotTurn(roomName, botUid);
+            // Remove from processingBots after turn is passed
+            processingBots.delete(botKey);
           }
        }, 2000);
     }, 1500);
   } else if (communityPositions.includes(player.position)) {
     isDrawingCard = true;
     player.inCardDraw = true;
+    // Keep bot in processing state during card draw
+    const botKey = `${roomName}_${botUid}`;
+    processingBots.add(botKey);
+    // Set cooldown now to prevent interval from triggering again before turn passes
+    turnCooldowns[roomName] = Date.now() + 6000;
     io.to(roomName).emit("before-draw", { type: "community", uid: botUid });
     setTimeout(() => {
        if (!rooms[roomName]) return;
@@ -3068,10 +2576,14 @@ const playBotTurn = async (roomName: string, botUid: string) => {
        io.to(roomName).emit("draw-card", { type: "community", uid: botUid, cardId });
        setTimeout(() => {
           if (!rooms[roomName]) return;
+          // Notify client that animation is starting BEFORE applying effect
+          io.to(roomName).emit("animation-start", { roomName, uid: botUid });
           applyCardEffect(roomName, botUid, "community", cardId);
           const updatedPlayer = rooms[roomName].players.find(p => p.uid === botUid);
           if (updatedPlayer && !updatedPlayer.inCardDraw) {
             passBotTurn(roomName, botUid);
+            // Remove from processingBots after turn is passed
+            processingBots.delete(botKey);
           }
        }, 2000);
     }, 1500);
@@ -3137,6 +2649,12 @@ const playBotTurn = async (roomName: string, botUid: string) => {
       nextPlayerUid: room.players.find(p => p.isActive)?.uid || botUid,
     });
     
+    // Add bot to animating players so passBotTurn waits for animation
+    if (!animatingPlayers[roomName]) {
+      animatingPlayers[roomName] = new Set();
+    }
+    animatingPlayers[roomName].add(botUid);
+    
     if (!player.bankrupt && (player.botDifficulty === "medium" || player.botDifficulty === "hard")) {
        const monopolies: string[] = [];
        for (const color in colorGroups) {
@@ -3183,7 +2701,13 @@ setInterval(() => {
       const activePlayer = room.players.find(p => p.isActive);
       if (activePlayer && activePlayer.isBot) {
         const botKey = `${roomName}_${activePlayer.uid}`;
-        if (!processingBots.has(botKey)) {
+        // Skip if already processing or still animating
+        if (!processingBots.has(botKey) && !animatingPlayers[roomName]?.has(activePlayer.uid)) {
+          // Check turn cooldown to prevent immediate re-triggering after card draws
+          const cooldownEnd = turnCooldowns[roomName] || 0;
+          if (Date.now() < cooldownEnd) {
+            continue; // Wait for cooldown to expire
+          }
           processingBots.add(botKey);
           playBotTurn(roomName, activePlayer.uid).catch(console.error).finally(() => {
             processingBots.delete(botKey);
