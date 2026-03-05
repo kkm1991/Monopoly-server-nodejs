@@ -491,7 +491,8 @@ const applyCardEffect = (
       // Skip rent check for: GO (0), Jail (10), Chance/Community positions
       const skipRentPositions = [0, 10, 2, 7, 17, 22, 33, 36]; // GO, Jail, Chance, Community
       if (!skipRentPositions.includes(player.position)) {
-        const rentResult = calculateRent(room, player.position, roomName, 0); // dice=0 for card movement
+        const cardBuildingLevel = propertyBuildings[roomName]?.[player.position] || 0;
+        const rentResult = calculateRent(room, player.position, roomName, 0, cardBuildingLevel); // dice=0 for card movement
         
         if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
           // Check if player has enough money
@@ -552,6 +553,9 @@ const applyCardEffect = (
                 hasMonopoly: rentResult.hasMonopoly,
                 isPartial: true,
                 isBankruptcy: true,
+                baseRent: rentResult.baseRent,
+                buildingLevel: rentResult.buildingLevel,
+                houseCount: rentResult.houseCount,
               });
               
               // Check for winner
@@ -576,6 +580,9 @@ const applyCardEffect = (
               hasMonopoly: rentResult.hasMonopoly,
               isPartial: false,
               isFromCard: true,
+              baseRent: rentResult.baseRent,
+              buildingLevel: rentResult.buildingLevel,
+              houseCount: rentResult.houseCount,
             });
           }
         }
@@ -1320,7 +1327,8 @@ socket.on("animation-start", ({ roomName, uid }) => {
 
     // ================= RENT PAYMENT LOGIC =================
     // Check if landed property is owned and pay rent
-    const rentResult = calculateRent(room, player.position, roomName, dice);
+    const moveBuildingLevel = propertyBuildings[roomName]?.[player.position] || 0;
+    const rentResult = calculateRent(room, player.position, roomName, dice, moveBuildingLevel);
     
     if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
       // Check if player has enough money
@@ -1391,6 +1399,9 @@ socket.on("animation-start", ({ roomName, uid }) => {
             hasMonopoly: rentResult.hasMonopoly,
             isPartial: true,
             isBankruptcy: true,
+            baseRent: rentResult.baseRent,
+            buildingLevel: rentResult.buildingLevel,
+            houseCount: rentResult.houseCount,
           });
           
           // Check for winner
@@ -1414,6 +1425,9 @@ socket.on("animation-start", ({ roomName, uid }) => {
           hasHotel: rentResult.hasHotel,
           hasMonopoly: rentResult.hasMonopoly,
           isPartial: false,
+          baseRent: rentResult.baseRent,
+          buildingLevel: rentResult.buildingLevel,
+          houseCount: rentResult.houseCount,
         });
       }
     }
@@ -2302,6 +2316,112 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
   }
 });
 
+  // ================= ADMIN GAME MASTER CONSOLE =================
+  const ADMIN_KEY = process.env.ADMIN_KEY || "myanmarpoly-admin-2026";
+
+  socket.on("admin-set-money", ({ adminKey, roomName, uid, money }) => {
+    if (adminKey !== ADMIN_KEY) { socket.emit("admin-error", "Invalid admin key"); return; }
+    const room = rooms[roomName];
+    if (!room) { socket.emit("admin-error", `Room "${roomName}" not found`); return; }
+    const player = room.players.find(p => p.uid === uid);
+    if (!player) { socket.emit("admin-error", `Player "${uid}" not found`); return; }
+    const oldMoney = player.money;
+    player.money = money;
+    console.log(`🔧 [ADMIN] Set ${player.name}'s money: Ks ${oldMoney} → Ks ${money}`);
+    io.to(roomName).emit("update-rooms", rooms);
+    socket.emit("admin-success", `Set ${player.name}'s money to Ks ${money}`);
+  });
+
+  socket.on("admin-set-position", ({ adminKey, roomName, uid, position }) => {
+    if (adminKey !== ADMIN_KEY) { socket.emit("admin-error", "Invalid admin key"); return; }
+    const room = rooms[roomName];
+    if (!room) { socket.emit("admin-error", `Room "${roomName}" not found`); return; }
+    const player = room.players.find(p => p.uid === uid);
+    if (!player) { socket.emit("admin-error", `Player "${uid}" not found`); return; }
+    const oldPos = player.position;
+    player.position = position;
+    console.log(`🔧 [ADMIN] Moved ${player.name}: position ${oldPos} → ${position}`);
+    io.to(roomName).emit("move-result", {
+      uid,
+      from: oldPos,
+      to: position,
+      money: player.money,
+      nextPlayerUid: uid,
+    });
+    io.to(roomName).emit("update-rooms", rooms);
+    socket.emit("admin-success", `Moved ${player.name} to position ${position}`);
+  });
+
+  socket.on("admin-give-properties", ({ adminKey, roomName, uid, properties }) => {
+    if (adminKey !== ADMIN_KEY) { socket.emit("admin-error", "Invalid admin key"); return; }
+    const room = rooms[roomName];
+    if (!room) { socket.emit("admin-error", `Room "${roomName}" not found`); return; }
+    const player = room.players.find(p => p.uid === uid);
+    if (!player) { socket.emit("admin-error", `Player "${uid}" not found`); return; }
+    // Remove properties from other players first
+    const newProps: number[] = Array.isArray(properties) ? properties : [];
+    room.players.forEach(p => {
+      p.inventory.properties = p.inventory.properties.filter(prop => !newProps.includes(prop));
+    });
+    // Add to target player (avoid duplicates)
+    newProps.forEach(prop => {
+      if (!player.inventory.properties.includes(prop)) {
+        player.inventory.properties.push(prop);
+      }
+    });
+    console.log(`🔧 [ADMIN] Gave ${player.name} properties: [${newProps.join(", ")}]`);
+    io.to(roomName).emit("update-rooms", rooms);
+    socket.emit("admin-success", `Gave ${player.name} ${newProps.length} properties`);
+  });
+
+  socket.on("admin-set-buildings", ({ adminKey, roomName, propertyIndex, level }) => {
+    if (adminKey !== ADMIN_KEY) { socket.emit("admin-error", "Invalid admin key"); return; }
+    const room = rooms[roomName];
+    if (!room) { socket.emit("admin-error", `Room "${roomName}" not found`); return; }
+    if (!propertyBuildings[roomName]) propertyBuildings[roomName] = {};
+    propertyBuildings[roomName][propertyIndex] = level;
+    const levelText = level === 0 ? "none" : level === 5 ? "hotel" : `${level} house(s)`;
+    console.log(`🔧 [ADMIN] Set property ${propertyIndex} building level to ${levelText}`);
+    // Emit house/hotel built to update client visuals
+    if (level === 5) {
+      io.to(roomName).emit("hotel-built", { uid: "admin", propertyIndex, cost: 0 });
+    } else if (level > 0) {
+      io.to(roomName).emit("house-built", { uid: "admin", propertyIndex, houseCount: level, hasHotel: false, cost: 0 });
+    }
+    io.to(roomName).emit("update-rooms", rooms);
+    socket.emit("admin-success", `Set property ${propertyIndex} to ${levelText}`);
+  });
+
+  socket.on("admin-get-state", ({ adminKey, roomName }) => {
+    if (adminKey !== ADMIN_KEY) { socket.emit("admin-error", "Invalid admin key"); return; }
+    const room = rooms[roomName];
+    if (!room) { socket.emit("admin-error", `Room "${roomName}" not found`); return; }
+    // Deduplicate players by uid
+    const seenUids = new Set<string>();
+    const uniquePlayers = room.players.filter(p => {
+      if (seenUids.has(p.uid)) return false;
+      seenUids.add(p.uid);
+      return true;
+    });
+    const state = {
+      roomName,
+      status: room.status,
+      players: uniquePlayers.map(p => ({
+        uid: p.uid,
+        name: p.name,
+        money: p.money,
+        position: p.position,
+        properties: p.inventory.properties,
+        isActive: p.isActive,
+        surrendered: p.surrendered,
+        bankrupt: p.bankrupt,
+        isBot: p.isBot,
+      })),
+      buildings: propertyBuildings[roomName] || {},
+    };
+    socket.emit("admin-state", state);
+  });
+
   // Handle disconnect
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected", socket.id);
@@ -2590,7 +2710,8 @@ const playBotTurn = async (roomName: string, botUid: string) => {
   }
 
   if (!isDrawingCard) {
-    const rentResult = calculateRent(room, player.position, roomName, dice);
+    const botBuildingLevel = propertyBuildings[roomName]?.[player.position] || 0;
+    const rentResult = calculateRent(room, player.position, roomName, dice, botBuildingLevel);
     if (rentResult.owner && rentResult.owner.uid !== player.uid && rentResult.rentAmount > 0) {
       if (player.money >= rentResult.rentAmount) {
          player.money -= rentResult.rentAmount;
@@ -2603,6 +2724,9 @@ const playBotTurn = async (roomName: string, botUid: string) => {
            hasHotel: rentResult.hasHotel,
            hasMonopoly: rentResult.hasMonopoly,
            isPartial: false,
+           baseRent: rentResult.baseRent,
+           buildingLevel: rentResult.buildingLevel,
+           houseCount: rentResult.houseCount,
          });
       } else {
          const amountPaid = player.money;

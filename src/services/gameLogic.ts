@@ -1,5 +1,5 @@
 import { Room, Player } from '../types/index.js';
-import { propertyBuildings, rooms, gameTimers } from './gameState.js';
+import { rooms, gameTimers } from './gameState.js';
 import { updatePlayerStats, rewardPlayers } from './dbService.js';
 import { broadcastToRoom } from './socketService.js';
 import { propertyRentData, colorGroups } from '../utils/constants.js';
@@ -22,23 +22,24 @@ export const calculateRent = (
   room: Room, 
   propertyIndex: number, 
   roomName: string,
-  diceRoll: number = 0
-): { rentAmount: number; owner: Player | null; hasMonopoly: boolean; hasHotel: boolean } => {
+  diceRoll: number = 0,
+  buildingLevel: number = 0
+): { rentAmount: number; owner: Player | null; hasMonopoly: boolean; hasHotel: boolean; baseRent: number; buildingLevel: number; houseCount: number } => {
   const rentInfo = propertyRentData[propertyIndex];
   if (!rentInfo) {
-    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
+    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false, baseRent: 0, buildingLevel: 0, houseCount: 0 };
   }
   
   const owner = findPropertyOwner(room, propertyIndex);
   if (!owner) {
-    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false };
+    return { rentAmount: 0, owner: null, hasMonopoly: false, hasHotel: false, baseRent: 0, buildingLevel: 0, houseCount: 0 };
   }
   
   const hasMonopoly = hasColorMonopoly(room, owner.uid, rentInfo.color);
-  const buildingLevel = propertyBuildings[roomName]?.[propertyIndex] || 0;
   const hasHotel = buildingLevel === 5;
   const houseCount = buildingLevel > 0 && buildingLevel < 5 ? buildingLevel : 0;
   
+  const originalBaseRent = rentInfo.rent;
   let baseRent = rentInfo.rent;
   if (hasHotel) {
     baseRent = rentInfo.hotelRent;
@@ -56,8 +57,11 @@ export const calculateRent = (
     baseRent = multiplier * diceRoll;
   }
   
-  const rentAmount = (hasMonopoly && rentInfo.color !== "utility") ? baseRent * 2 : baseRent;
-  return { rentAmount, owner, hasMonopoly, hasHotel };
+  // Monopoly 2x bonus only applies to base rent (no houses/hotels)
+  // When houses or hotels are built, the rent values already reflect the higher amounts
+  const hasBuildings = hasHotel || houseCount > 0;
+  const rentAmount = (hasMonopoly && !hasBuildings && rentInfo.color !== "utility" && rentInfo.color !== "rail") ? baseRent * 2 : baseRent;
+  return { rentAmount, owner, hasMonopoly, hasHotel, baseRent: originalBaseRent, buildingLevel, houseCount };
 };
 
 export const railroads = [5, 15, 25, 35];
