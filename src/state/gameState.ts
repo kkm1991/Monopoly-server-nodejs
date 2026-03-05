@@ -19,13 +19,7 @@ export const activeAuctions: Record<string, {
 }> = {};
 export const animatingPlayers: Record<string, Set<string>> = {};
 
-// Default rooms configuration
-export const DEFAULT_ROOM_NAMES = ["Room 1", "Room 2", "Room 3", "Room 4", "Room 5"];
-
 // Helper functions
-export const isDefaultRoom = (roomName: string): boolean => {
-  return DEFAULT_ROOM_NAMES.includes(roomName);
-};
 
 export const deduplicatePlayers = <T extends { uid: string }>(players: T[]): T[] => {
   return players.reduce((acc: T[], player) => {

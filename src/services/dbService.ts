@@ -58,6 +58,42 @@ export const fetchPlayerWins = async (uid: string): Promise<number> => {
   }
 };
 
+export const getPlayerCoins = async (uid: string): Promise<number> => {
+  try {
+    const response = await fetch(`${CLIENT_API_URL}/api/player-economy?uid=${uid}`, {
+      headers: {
+        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+      }
+    });
+    if (!response.ok) return 0;
+    const data = await response.json();
+    return data.coins || 0;
+  } catch (error) {
+    console.error(`\u274c Error fetching coins for ${uid}:`, error);
+    return 0;
+  }
+};
+
+export const deductCoins = async (uid: string, amount: number): Promise<boolean> => {
+  try {
+    const res = await pool.query(`
+      UPDATE users 
+      SET coins = coins - $1
+      WHERE id = $2 AND coins >= $1
+      RETURNING coins;
+    `, [amount, uid]);
+    
+    if (res.rowCount && res.rowCount > 0) {
+      console.log(`\ud83e\ude99 Deducted ${amount} coins from ${uid}. New balance: ${res.rows[0].coins}`);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`\u274c Failed to deduct coins from ${uid}:`, err);
+    return false;
+  }
+};
+
 export const fetchPlayerEconomy = async (uid: string) => {
   try {
     const response = await fetch(`${CLIENT_API_URL}/api/player-economy?uid=${uid}`, {
@@ -76,21 +112,25 @@ export const fetchPlayerEconomy = async (uid: string) => {
   return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
 };
 
-export const rewardPlayers = async (winnerUid: string, players: any[]) => {
+export const rewardPlayers = async (winnerUid: string, players: any[], coinsCost: number = 50): Promise<{ winnerReward: number; participantReward: number }> => {
   try {
-    const winnerReward = 100;
-    const participantReward = 20;
+    const winnerReward = players.length * coinsCost;
+    const participantReward = 0;
 
     for (const p of players) {
       const reward = p.uid === winnerUid ? winnerReward : participantReward;
-      await pool.query(`
-        UPDATE users 
-        SET coins = coins + $1
-        WHERE id = $2
-      `, [reward, p.uid]);
-      console.log(`\ud83e\ude99 Awarded ${reward} coins to ${p.name}`);
+      if (reward > 0) {
+        await pool.query(`
+          UPDATE users 
+          SET coins = coins + $1
+          WHERE id = $2
+        `, [reward, p.uid]);
+        console.log(`\ud83e\ude99 Awarded ${reward} coins to ${p.name}`);
+      }
     }
+    return { winnerReward, participantReward };
   } catch (err) {
     console.error("Failed to reward players:", err);
+    return { winnerReward: 0, participantReward: 0 };
   }
 };

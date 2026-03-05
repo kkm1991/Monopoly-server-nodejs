@@ -33,11 +33,38 @@ const drawCard = (deck: number[]): number => {
 export const registerGameHandlers = (socket: Socket) => {
 
   // Start game
-  socket.on("start-game", async ({ roomName }) => {
+  socket.on("start-game", async ({ roomName, gameRules }) => {
     const room = rooms[roomName];
     if (!room || room.players.length < 2) {
       socket.emit("error", "Need at least 2 players to start");
       return;
+    }
+
+    if (gameRules) {
+      room.gameRules = gameRules;
+    }
+
+    const coinsCost = room.gameRules?.coinsCost ?? 50;
+
+    if (coinsCost > 0) {
+      const { fetchPlayerEconomy, deductCoins } = await import('../services/dbService.js');
+      // Check balances first
+      for (const p of room.players) {
+        if (!p.isBot) {
+          const economy = await fetchPlayerEconomy(p.uid);
+          if (economy.coins < coinsCost) {
+            socket.emit("error", `Player ${p.name} doesn't have enough coins (${coinsCost})!`);
+            return;
+          }
+        }
+      }
+      // Deduct coins
+      for (const p of room.players) {
+        if (!p.isBot) {
+          await deductCoins(p.uid, coinsCost);
+        }
+      }
+      broadcastToRoom(roomName, "coins-deducted", { amount: coinsCost });
     }
 
     // Deduplicate players
@@ -61,7 +88,7 @@ export const registerGameHandlers = (socket: Socket) => {
       ...p,
       isActive: i === startingIndex,
       position: 0,
-      money: 1500,
+      money: room.gameRules?.startingMoney ?? 1500,
       inventory: { chanceCards: [], communityChestCards: [], properties: [] },
     }));
 

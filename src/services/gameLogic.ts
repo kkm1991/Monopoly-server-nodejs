@@ -125,6 +125,10 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
     clearTimeout(gameTimers[roomName]);
     delete gameTimers[roomName];
   }
+  if (gameTimers[roomName + "_duration"]) {
+    clearTimeout(gameTimers[roomName + "_duration"]);
+    delete gameTimers[roomName + "_duration"];
+  }
 
   const playerData = room.players.map(p => ({
     uid: p.uid,
@@ -165,7 +169,12 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
     gameId
   );
 
-  await rewardPlayers(winner.uid, room.players);
+  const coinsCost = room.gameRules?.coinsCost ?? 50;
+  const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost);
+  
+  if (winnerReward > 0) {
+    broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
+  }
 };
 
 export const startGameTimer = (roomName: string) => {
@@ -177,19 +186,55 @@ export const startGameTimer = (roomName: string) => {
   if (gameTimers[roomName]) {
     clearTimeout(gameTimers[roomName]);
   }
+  if (gameTimers[roomName + "_duration"]) {
+    clearTimeout(gameTimers[roomName + "_duration"]);
+  }
 
+  // Minimum duration timer (1 min) to qualify for rankings
   gameTimers[roomName] = setTimeout(() => {
     const room = rooms[roomName];
     if (!room || room.status !== "in-game") return;
     
     room.minDurationMet = true; 
-    console.log(`\u23f1\ufe0f Minimum 1-minute duration met for ${roomName} - games now qualify for rankings`);
+    console.log(`⏱️ Minimum 1-minute duration met for ${roomName} - games now qualify for rankings`);
     
-    const activePlayers = room.players.filter(p => !p.surrendered);
+    const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
     if (activePlayers.length === 1) {
       endGame(roomName, activePlayers[0], "last-standing");
     }
   }, 1 * 60 * 1000); 
 
-  console.log(`\u23f1\ufe0f 1-minute minimum duration timer started for ${roomName}`);
+  // Custom Game Rules Timer
+  const customTimerMinutes = room.gameRules?.timer;
+  if (customTimerMinutes && customTimerMinutes !== "unlimited") {
+    const timerMs = (customTimerMinutes as number) * 60 * 1000;
+    
+    gameTimers[roomName + "_duration"] = setTimeout(() => {
+      const room = rooms[roomName];
+      if (!room || room.status !== "in-game") return;
+
+      console.log(`⏱️ Custom timer (${customTimerMinutes}m) ended for ${roomName}`);
+      
+      const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
+      if (activePlayers.length === 0) return;
+      
+      let wealthiestPlayer = activePlayers[0];
+      let maxWealth = -1;
+      
+      for (const player of activePlayers) {
+        // Calculate total wealth (money + roughly 100 per property for tie-breaking)
+        const wealth = player.money + (player.inventory?.properties?.length || 0) * 100;
+        if (wealth > maxWealth) {
+          maxWealth = wealth;
+          wealthiestPlayer = player;
+        }
+      }
+      
+      endGame(roomName, wealthiestPlayer, "time-limit");
+      
+    }, timerMs);
+    console.log(`⏱️ Custom game timer started: ${customTimerMinutes} minutes for ${roomName}`);
+  }
+
+  console.log(`⏱️ 1-minute minimum duration timer started for ${roomName}`);
 };

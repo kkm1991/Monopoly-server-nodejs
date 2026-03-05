@@ -38,6 +38,13 @@ export type CardOffer = {
 
 export type Room = {
   name: string;
+  creatorUid?: string;
+  gameRules?: {
+    timer: number | 'unlimited';
+    startingMoney: number;
+    coinsCost: number;
+    winPrizeMultiplier: number;
+  };
   players: Player[];
   maxPlayers: number;
   status: "waiting" | "in-game" | "finished";

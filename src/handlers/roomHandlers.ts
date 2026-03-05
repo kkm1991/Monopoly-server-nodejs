@@ -1,5 +1,5 @@
 import { Socket } from 'socket.io';
-import { rooms, emitRooms, emitRoomsToSocket, isDefaultRoom, DEFAULT_ROOM_NAMES, broadcastToRoom } from '../state/gameState.js';
+import { rooms, emitRooms, emitRoomsToSocket, broadcastToRoom } from '../state/gameState.js';
 import { fetchPlayerWins, fetchPlayerEconomy } from '../services/dbService.js';
 
 export const registerRoomHandlers = (socket: Socket) => {
@@ -21,6 +21,7 @@ export const registerRoomHandlers = (socket: Socket) => {
 
     rooms[roomName] = {
       name: roomName,
+      creatorUid: user.uid,
       players: [
         {
           uid: user.uid,
@@ -149,16 +150,8 @@ export const registerRoomHandlers = (socket: Socket) => {
     room.players = room.players.filter((p) => p.uid !== uid);
     socket.leave(roomName);
 
-    // Reset default room when empty
-    if (room.players.length === 0 && isDefaultRoom(roomName)) {
-      room.status = "waiting";
-      room.gameStartTime = undefined;
-      room.minDurationMet = false;
-      room.winner = undefined;
-    }
-
-    // Delete non-default rooms when empty
-    if (room.players.length === 0 && !isDefaultRoom(roomName)) {
+    // Delete rooms when empty
+    if (room.players.length === 0) {
       delete rooms[roomName];
     }
 
@@ -176,24 +169,29 @@ export const registerRoomHandlers = (socket: Socket) => {
 
   // Delete room
   socket.on("delete-room", ({ roomName }) => {
-    if (isDefaultRoom(roomName)) {
-      socket.emit("error", "Cannot delete default rooms");
-      return;
-    }
     delete rooms[roomName];
     emitRooms();
   });
-};
 
-export const createDefaultRooms = () => {
-  DEFAULT_ROOM_NAMES.forEach((roomName) => {
-    rooms[roomName] = {
-      name: roomName,
-      players: [],
-      maxPlayers: 8,
-      status: "waiting",
-    };
-    console.log(`✅ Default room created: ${roomName}`);
+  // Kick player
+  socket.on("kick-player", ({ roomName, targetUid, user }) => {
+    const room = rooms[roomName];
+    if (!room) return;
+    if (room.status !== "waiting") return;
+    if (room.creatorUid !== user.uid) return;
+    if (user.uid === targetUid) return;
+
+    const targetPlayer = room.players.find(p => p.uid === targetUid);
+    if (!targetPlayer) return;
+
+    room.players = room.players.filter((p) => p.uid !== targetUid);
+
+    const targetSocket = socket.nsp.sockets.get(targetPlayer.socketId);
+    if (targetSocket) {
+      targetSocket.leave(roomName);
+      targetSocket.emit("kicked-from-room", { roomName });
+    }
+
+    emitRooms();
   });
-  console.log(`🎮 ${DEFAULT_ROOM_NAMES.length} default rooms initialized`);
 };
