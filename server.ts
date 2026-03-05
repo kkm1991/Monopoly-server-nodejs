@@ -866,7 +866,8 @@ io.on("connection", (socket) => {
     }
 
     // Check if game should end (player left during active game)
-    if (room && room.status === "in-game") {
+    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
+    if (room && room.status === "in-game" && !room.statsUpdated) {
       const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
       if (activePlayers.length === 1) {
         const winner = activePlayers[0];
@@ -900,7 +901,7 @@ io.on("connection", (socket) => {
           );
           const coinsCost = room.gameRules?.coinsCost ?? 0;
           if (coinsCost > 0) {
-            rewardPlayers(winner.uid, allPlayersBeforeLeave, coinsCost).then(({ winnerReward }) => {
+            rewardPlayers(winner.uid, allPlayersBeforeLeave, coinsCost, room.originalPlayerCount).then(({ winnerReward }) => {
               if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
             });
           }
@@ -942,8 +943,9 @@ io.on("connection", (socket) => {
     });
 
     // Check if game should end - inline check using local rooms
+    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
     const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
-    if (activePlayers.length === 1) {
+    if (activePlayers.length === 1 && !room.statsUpdated) {
       const winner = activePlayers[0];
       console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (last-standing after surrender)`);
       
@@ -1007,9 +1009,9 @@ io.on("connection", (socket) => {
         const coinsCost = room.gameRules?.coinsCost ?? 0;
         console.log(`💰 Coins cost for this game: ${coinsCost}. Total players: ${room.players.length}`);
         if (coinsCost > 0) {
-          const expectedWinnerReward = room.players.length * coinsCost;
-          console.log(`💰 Expected winner reward: ${expectedWinnerReward} (${room.players.length} players × ${coinsCost} coins)`);
-          rewardPlayers(winner.uid, room.players, coinsCost).then(({ winnerReward }) => {
+          const expectedWinnerReward = (room.originalPlayerCount || room.players.length) * coinsCost;
+          console.log(`💰 Expected winner reward: ${expectedWinnerReward} (${room.originalPlayerCount || room.players.length} players × ${coinsCost} coins)`);
+          rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount).then(({ winnerReward }) => {
             console.log(`💰 Actual winner reward: ${winnerReward}`);
             if (winnerReward > 0) {
               broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
@@ -1088,8 +1090,9 @@ io.on("connection", (socket) => {
     });
 
     // Check if game should end - inline check using local rooms
+    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
     const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
-    if (activePlayers.length === 1) {
+    if (activePlayers.length === 1 && !room.statsUpdated) {
       const winner = activePlayers[0];
       console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (last-standing after bankruptcy)`);
       
@@ -1280,6 +1283,131 @@ socket.on("animation-start", ({ roomName, uid }) => {
   console.log(`🎬 Animation started for player ${uid} in ${roomName}`);
 });
 
+// ================= Pay Debt =================
+socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  const player = room.players.find((p) => p.uid === uid);
+  const owner = room.players.find((p) => p.uid === ownerUid);
+  if (!player || !owner) return;
+
+  if (player.money >= amount) {
+    player.money -= amount;
+    owner.money += amount;
+
+    broadcastToRoom(roomName, "debt-paid", {
+      fromUid: uid,
+      toUid: ownerUid,
+      amount,
+      propertyIndex,
+    });
+
+    // Pass turn
+    const currentIndex = room.players.findIndex((p) => p.uid === uid);
+    let nextIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+      nextIndex = (nextIndex + 1) % room.players.length;
+      loops++;
+    }
+
+    room.players = room.players.map((p, i) => ({
+      ...p,
+      isActive: i === nextIndex,
+    }));
+
+    broadcastToRoom(roomName, "next-turn", {
+      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerIndex: nextIndex,
+    });
+
+    emitRooms();
+  }
+});
+
+// ================= Declare Bankruptcy =================
+socket.on("declare-bankruptcy", ({ roomName, uid, ownerUid, debtAmount }) => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  const player = room.players.find((p) => p.uid === uid);
+  const owner = room.players.find((p) => p.uid === ownerUid);
+  if (!player) return;
+
+  const amountPaid = player.money;
+  player.money = 0;
+  player.bankrupt = true;
+  player.isActive = false;
+
+  if (owner) {
+    owner.money += amountPaid;
+  }
+
+  returnAssetsToBank(roomName, player);
+
+  broadcastToRoom(roomName, "player-bankrupt", {
+    uid,
+    name: player.name,
+    debtAmount,
+    paidAmount: amountPaid,
+    ownerUid,
+    ownerName: owner?.name,
+  });
+
+  const winCheck = checkWinCondition(roomName);
+  if (winCheck.hasWinner && winCheck.winner) {
+    endGame(roomName, winCheck.winner, "last-standing");
+  } else {
+    // Pass turn
+    const currentIndex = room.players.findIndex((p) => p.uid === uid);
+    let nextIndex = (currentIndex + 1) % room.players.length;
+    let loops = 0;
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+      nextIndex = (nextIndex + 1) % room.players.length;
+      loops++;
+    }
+
+    room.players = room.players.map((p, i) => ({
+      ...p,
+      isActive: i === nextIndex,
+    }));
+
+    broadcastToRoom(roomName, "next-turn", {
+      nextPlayerUid: room.players[nextIndex].uid,
+      nextPlayerIndex: nextIndex,
+    });
+
+    emitRooms();
+  }
+});
+
+// ================= Jail Card Decision =================
+socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
+  const room = rooms[roomName];
+  if (!room) return;
+
+  const player = room.players.find((p) => p.uid === uid);
+  if (!player) return;
+
+  if (useCard) {
+    // Use get out of jail card
+    if (player.inventory.chanceCards.includes(7)) {
+      player.inventory.chanceCards = player.inventory.chanceCards.filter(id => id !== 7);
+    } else if (player.inventory.communityChestCards.includes(5)) {
+      player.inventory.communityChestCards = player.inventory.communityChestCards.filter(id => id !== 5);
+    }
+
+    broadcastToRoom(roomName, "jail-card-used", {
+      uid,
+      message: `${player.name} used a Get Out of Jail Free card!`,
+    });
+  } else {
+    // Go to jail
+    player.position = 10;
+    broadcastToRoom(roomName, "player-moved", { uid, position: 10, reason: "jail" });
+  }
+});
 
   socket.on("start-game", async ({ roomName, gameRules }) => {
     const room = rooms[roomName];
@@ -1294,6 +1422,19 @@ socket.on("animation-start", ({ roomName, uid }) => {
     }
 
     const coinsCost = room.gameRules?.coinsCost ?? 0;
+
+    // Deduplicate players by uid BEFORE any operations (prevent double coin deduction)
+    const uniquePlayers = room.players.reduce((acc: any[], p: any) => {
+      if (!acc.find(existing => existing.uid === p.uid)) {
+        acc.push(p);
+      }
+      return acc;
+    }, []);
+    
+    if (uniquePlayers.length !== room.players.length) {
+      console.log(`⚠️ Removed ${room.players.length - uniquePlayers.length} duplicate players from room ${roomName} BEFORE coin deduction`);
+      room.players = uniquePlayers;
+    }
 
     // Deduct coins from all players if entry fee is set
     if (coinsCost > 0) {
@@ -1311,23 +1452,20 @@ socket.on("animation-start", ({ roomName, uid }) => {
       const { deductCoins } = await import('./src/services/dbService.js');
       for (const p of room.players) {
         if (!p.isBot) {
+          const originalBalance = (await fetchPlayerEconomy(p.uid)).coins;
           await deductCoins(p.uid, coinsCost);
+          const newBalance = originalBalance - coinsCost;
+          // Emit dialog notification to each player individually
+          io.to(p.socketId || roomName).emit("coin-deduction-dialog", {
+            playerName: p.name,
+            originalBalance,
+            deductedAmount: coinsCost,
+            newBalance,
+            message: `💰 ${p.name} မှ မူလ ${originalBalance} coins မှ ${coinsCost} coins နှုတ်ယူခြင်း\nကျန်ရှိ ${newBalance} coins`,
+          });
         }
       }
       broadcastToRoom(roomName, "coins-deducted", { amount: coinsCost });
-    }
-
-    // Deduplicate players by uid before starting game
-    const uniquePlayers = room.players.reduce((acc: any[], p: any) => {
-      if (!acc.find(existing => existing.uid === p.uid)) {
-        acc.push(p);
-      }
-      return acc;
-    }, []);
-    
-    if (uniquePlayers.length !== room.players.length) {
-      console.log(`\u26a0\ufe0f Removed ${room.players.length - uniquePlayers.length} duplicate players from room ${roomName}`);
-      room.players = uniquePlayers;
     }
 
     const startingMoney = room.gameRules?.startingMoney ?? 1500;
@@ -1337,6 +1475,7 @@ socket.on("animation-start", ({ roomName, uid }) => {
     room.winner = undefined;
     room.minDurationMet = false;
     room.statsUpdated = false;
+    room.originalPlayerCount = room.players.length; // Store original count for prize calculation
     
     // Fetch wins for all players from the database
     const playerWinsPromises = room.players.map((p) => fetchPlayerWins(p.uid));
@@ -1397,7 +1536,7 @@ socket.on("animation-start", ({ roomName, uid }) => {
           updatePlayerStats({ uid: w.uid, name: w.name }, r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })), gId);
           const cc = r.gameRules?.coinsCost ?? 0;
           if (cc > 0) {
-            rewardPlayers(w.uid, r.players, cc).then(({ winnerReward }) => {
+            rewardPlayers(w.uid, r.players, cc, r.originalPlayerCount).then(({ winnerReward }) => {
               if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: w.uid });
             });
           }
@@ -1441,7 +1580,7 @@ socket.on("animation-start", ({ roomName, uid }) => {
           updatePlayerStats({ uid: wealthiest.uid, name: wealthiest.name }, r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })), gId);
           const cc = r.gameRules?.coinsCost ?? 0;
           if (cc > 0) {
-            rewardPlayers(wealthiest.uid, r.players, cc).then(({ winnerReward }) => {
+            rewardPlayers(wealthiest.uid, r.players, cc, r.originalPlayerCount).then(({ winnerReward }) => {
               if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: wealthiest.uid });
             });
           }

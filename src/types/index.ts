@@ -53,4 +53,5 @@ export type Room = {
   pendingCardOffers?: Record<string, CardOffer>;
   statsUpdated?: boolean; // Prevent duplicate stats updates
   minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
+  originalPlayerCount?: number; // Track initial player count for prize calculation
 };

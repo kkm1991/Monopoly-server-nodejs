@@ -101,25 +101,25 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
   const room = rooms[roomName];
   if (!room) return;
 
+  // Set guards FIRST to prevent race conditions
   if (room.status === "finished" && room.winner) {
-    console.log(`\u26a0\ufe0f Game already ended in ${roomName}, skipping duplicate endGame call`);
+    console.log(`⚠️ Game already ended in ${roomName}, skipping duplicate endGame call`);
     return;
   }
 
   if (room.statsUpdated) {
-    console.log(`\u26a0\ufe0f Player stats already updated for ${roomName}, skipping`);
+    console.log(`⚠️ Player stats already updated for ${roomName}, skipping`);
     return;
   }
-  
+
+  // Mark as finished and stats updated BEFORE any async operations
+  room.status = "finished";
+  room.winner = winner.uid;
   room.statsUpdated = true;
 
   const now = new Date().toISOString();
-  
   const gameStartTime = room.gameStartTime || Date.now();
   const gameDurationSeconds = Math.floor((Date.now() - gameStartTime) / 1000);
-
-  room.status = "finished";
-  room.winner = winner.uid;
 
   if (gameTimers[roomName]) {
     clearTimeout(gameTimers[roomName]);
@@ -170,7 +170,7 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
   );
 
   const coinsCost = room.gameRules?.coinsCost ?? 50;
-  const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost);
+  const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount);
   
   if (winnerReward > 0) {
     broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });

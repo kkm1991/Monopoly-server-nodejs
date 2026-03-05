@@ -112,23 +112,24 @@ export const fetchPlayerEconomy = async (uid: string) => {
   return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
 };
 
-export const rewardPlayers = async (winnerUid: string, players: any[], coinsCost: number = 50): Promise<{ winnerReward: number; participantReward: number }> => {
+export const rewardPlayers = async (winnerUid: string, players: any[], coinsCost: number = 50, originalPlayerCount?: number): Promise<{ winnerReward: number; participantReward: number }> => {
   try {
-    const winnerReward = players.length * coinsCost;
-    const participantReward = 0;
+    // Use original player count if provided (for accurate prize pool when players leave)
+    const playerCount = originalPlayerCount || players.length;
+    const winnerReward = playerCount * coinsCost;
 
     for (const p of players) {
-      const reward = p.uid === winnerUid ? winnerReward : participantReward;
-      if (reward > 0) {
+      if (p.uid === winnerUid) {
         await pool.query(`
           UPDATE users 
           SET coins = coins + $1
           WHERE id = $2
-        `, [reward, p.uid]);
-        console.log(`\ud83e\ude99 Awarded ${reward} coins to ${p.name}`);
+        `, [winnerReward, p.uid]);
+        console.log(`💰 Awarded ${winnerReward} coins to winner ${p.name}`);
       }
+      // Note: Losers don't get deducted here - coins were already deducted at game start
     }
-    return { winnerReward, participantReward };
+    return { winnerReward, participantReward: 0 };
   } catch (err) {
     console.error("Failed to reward players:", err);
     return { winnerReward: 0, participantReward: 0 };
