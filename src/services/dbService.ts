@@ -12,7 +12,7 @@ export const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000";
+const CLIENT_API_URL = process.env.CLIENT_API_URL || "https://myanmarpoly.online";
 
 export const updatePlayerStats = async (winner: any, players: any[], gameId?: string) => {
   try {
