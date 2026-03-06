@@ -27,9 +27,10 @@ jobs:
           host: ${{ secrets.VM_IP }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          # .next folder, public, package.json တို့ကိုပဲ ပို့မယ်
+          # လိုအပ်တဲ့ file တွေကိုပဲ ပို့မယ်
           source: ".next,public,package.json,next.config.js"
-          target: "/var/www/monopoly-server"
+          # အရေးကြီး: Folder နာမည်ကို VM ထဲကအတိုင်း ပြောင်းပါ
+          target: "/var/www/Monopoly-server-nodejs"
 
       - name: Restart PM2 on VM
         uses: appleboy/ssh-action@master
@@ -38,6 +39,9 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /var/www/monopoly-server
+            # Folder ထဲဝင်ပါ
+            cd /var/www/Monopoly-server-nodejs
+            # Production dependencies တွေကိုပဲ သွင်းပါ
             npm install --production
+            # PM2 ကို restart ချပါ
             pm2 restart monopoly-server || pm2 start npm --name "monopoly-server" -- start
