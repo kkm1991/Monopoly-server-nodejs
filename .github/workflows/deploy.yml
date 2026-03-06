@@ -1,0 +1,43 @@
+name: Build and Deploy to GCP
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18' # မင်းသုံးတဲ့ version ဖြစ်ရမယ်
+
+      - name: Install and Build
+        run: |
+          npm install
+          npm run build
+
+      - name: Copy Files to VM
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VM_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # .next folder, public, package.json တို့ကိုပဲ ပို့မယ်
+          source: ".next,public,package.json,next.config.js"
+          target: "/var/www/monopoly-server"
+
+      - name: Restart PM2 on VM
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VM_IP }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /var/www/monopoly-server
+            npm install --production
+            pm2 restart monopoly-server || pm2 start npm --name "monopoly-server" -- start
