@@ -9,3 +9,5 @@ export const voiceMessageChunks: Record<string, { chunks: Buffer[]; timestamp: n
 export const processingBots = new Set<string>();
 export const pendingPurchases: Record<string, Set<number>> = {};
 export const activeAuctions: Record<string, { propertyIndex: number; currentBid: number; highestBidder: string | null; bids: Array<{ uid: string; name: string; amount: number }>; active: boolean; endTime: number }> = {};
+export const animatingPlayers: Record<string, Set<string>> = {};
+export const turnCooldowns: Record<string, number> = {};

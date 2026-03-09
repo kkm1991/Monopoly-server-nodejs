@@ -26,6 +26,7 @@ export type Player = {
     communityChestCards: number[];
     properties: number[];
   };
+  missedTurns?: number; // Count of consecutively missed turns
 };
 
 export type CardOffer = {
@@ -54,4 +55,5 @@ export type Room = {
   statsUpdated?: boolean; // Prevent duplicate stats updates
   minDurationMet?: boolean; // Has game met minimum 1-minute duration for rankings
   originalPlayerCount?: number; // Track initial player count for prize calculation
+  lastTurnTimestamp?: number; // Time of the last turn activity
 };

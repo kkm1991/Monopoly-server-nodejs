@@ -88,13 +88,12 @@ export const checkWinCondition = (roomName: string): { hasWinner: boolean; winne
   const room = rooms[roomName];
   if (!room || room.status !== "in-game") return { hasWinner: false };
 
-  if (!room.minDurationMet) return { hasWinner: false };
-
   const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
   if (activePlayers.length === 1) {
     return { hasWinner: true, winner: activePlayers[0] };
   }
 
+  return { hasWinner: false };
 };
 
 export const endGame = async (roomName: string, winner: Player, reason: "last-standing" | "time-limit") => {
@@ -159,21 +158,29 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
   console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
   console.log(`\u23f1\ufe0f Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
 
-  const gameTimestamp = room.gameStartTime || Date.now();
-  const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
-  console.log(`\ud83c\udfae Updating stats with game ID: ${gameId}`);
-  
-  await updatePlayerStats(
-    { uid: winner.uid, name: winner.name },
-    room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })),
-    gameId
-  );
+  if (room.minDurationMet) {
+    const gameTimestamp = room.gameStartTime || Date.now();
+    const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
+    console.log(`📊 Updating stats for game: ${gameId}`);
+    
+    await updatePlayerStats(
+      { uid: winner.uid, name: winner.name },
+      room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })),
+      gameId
+    );
 
-  const coinsCost = room.gameRules?.coinsCost ?? 50;
-  const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount);
-  
-  if (winnerReward > 0) {
-    broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
+    const coinsCost = room.gameRules?.coinsCost ?? 50;
+    const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount);
+    
+    if (winnerReward > 0) {
+      broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
+    }
+  } else {
+    console.log(`\u23ed\ufe0f Game ended too early (${gameDurationSeconds}s). Stats and coins NOT updated.`);
+    broadcastToRoom(roomName, "game-ended-early", { 
+      message: "၅ မိနစ်ထက်ပိုမကြာသောကြောင့် Rankings score များမပေါင်းပေးပါ။",
+      durationSeconds: gameDurationSeconds
+    });
   }
 };
 
@@ -222,8 +229,18 @@ export const startGameTimer = (roomName: string) => {
       let maxWealth = -1;
       
       for (const player of activePlayers) {
-        // Calculate total wealth (money + roughly 100 per property for tie-breaking)
-        const wealth = player.money + (player.inventory?.properties?.length || 0) * 100;
+        // Calculate total wealth: Cash + Face Value of Properties
+        let wealth = player.money;
+        
+        if (player.inventory?.properties) {
+          player.inventory.properties.forEach(propIdx => {
+            const propData = propertyRentData[propIdx];
+            if (propData) {
+              wealth += propData.originalPrice;
+            }
+          });
+        }
+        
         if (wealth > maxWealth) {
           maxWealth = wealth;
           wealthiestPlayer = player;

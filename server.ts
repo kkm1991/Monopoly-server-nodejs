@@ -148,10 +148,7 @@ import { propertyRentData, colorGroups } from './src/utils/constants.js';
 import { Player, CardOffer, Room } from './src/types/index.js';
 
 // In-memory rooms
-const rooms: Record<string, Room> = {};
-
-// Game timer tracking
-const gameTimers: Record<string, NodeJS.Timeout> = {};
+import { rooms, gameTimers, propertyBuildings, activeAuctions, pendingPurchases, animatingPlayers, turnCooldowns } from './src/services/gameState.js';
 
 // Helper to deduplicate players in a room by uid
 const deduplicatePlayers = <T extends { uid: string }>(players: T[]): T[] => {
@@ -187,27 +184,7 @@ const emitRoomsToSocket = (socket: any) => {
   socket.emit("update-rooms", deduplicatedRooms);
 };
 
-// Property Buildings tracking (0 = none, 1-4 = houses, 5 = hotel)
-const propertyBuildings: Record<string, Record<number, number>> = {};
-
-// Active auctions tracking - MUST be at module level to be shared across all sockets
-const activeAuctions: Record<string, {
-  propertyIndex: number;
-  currentBid: number;
-  highestBidder: string | null;
-  bids: Array<{ uid: string; name: string; amount: number }>;
-  active: boolean;
-  endTime: number;
-}> = {};
-
-// Pending property purchases tracking - prevents race conditions
-const pendingPurchases: Record<string, Set<number>> = {};
-
-// Animation tracking - tracks which players are currently animating
-const animatingPlayers: Record<string, Set<string>> = {};
-
-// Turn cooldown tracking - prevents immediate re-triggering after turn changes
-const turnCooldowns: Record<string, number> = {};
+// Removed local declarations of state variables already imported from gameState.js above
 
 
 
@@ -684,45 +661,38 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Check if player was previously disconnected (reconnecting)
-    const disconnectedPlayer = room.players.find((p) => p.uid === user.uid && p.disconnected);
-    if (disconnectedPlayer) {
-      // Reconnect the player
-      disconnectedPlayer.disconnected = false;
-      disconnectedPlayer.socketId = socket.id;
+    // Check if player already exists in the room (reconnecting or taking over)
+    const existingPlayer = room.players.find((p) => p.uid === user.uid);
+    if (existingPlayer) {
+      // Reconnect the player - update socket ID and status
+      existingPlayer.disconnected = false;
+      existingPlayer.socketId = socket.id;
 
       // Refresh their cosmetics returning from the shop
       const economyAndCosmetics = await fetchPlayerEconomy(user.uid);
-      disconnectedPlayer.equippedItems = {
+      existingPlayer.equippedItems = {
         dice_skin: economyAndCosmetics.dice_skin,
         board_theme: economyAndCosmetics.board_theme,
         avatar: economyAndCosmetics.avatar,
       };
 
-      console.log(`🔌 Player ${disconnectedPlayer.name} reconnected to ${roomName}`);
+      console.log(`🔌 Player ${existingPlayer.name} reconnected/joined back to ${roomName}`);
       
       socket.join(roomName);
       emitRooms();
       socket.emit("room-joined", roomName);
       socket.emit("player-reconnected", {
-        uid: disconnectedPlayer.uid,
-        name: disconnectedPlayer.name,
+        uid: existingPlayer.uid,
+        name: existingPlayer.name,
         message: "Welcome back! You have rejoined the game.",
       });
       
       // Notify other players
       io.to(roomName).emit("player-reconnected-notification", {
-        uid: disconnectedPlayer.uid,
-        name: disconnectedPlayer.name,
-        message: `${disconnectedPlayer.name} has reconnected to the game`,
+        uid: existingPlayer.uid,
+        name: existingPlayer.name,
+        message: `${existingPlayer.name} has reconnected to the game`,
       });
-      return;
-    }
-
-    // Check if player already exists (not disconnected)
-    const exists = room.players.some((p) => p.uid === user.uid);
-    if (exists) {
-      socket.emit("error", "You are already in this room");
       return;
     }
 
@@ -942,83 +912,10 @@ io.on("connection", (socket) => {
       message: `${player.name} has surrendered and is now watching`,
     });
 
-    // Check if game should end - inline check using local rooms
-    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
-    const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
-    if (activePlayers.length === 1 && !room.statsUpdated) {
-      const winner = activePlayers[0];
-      console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (last-standing after surrender)`);
-      
-      room.status = "finished";
-      room.winner = winner.uid;
-      
-      // Clear timers
-      if (gameTimers[roomName]) {
-        clearTimeout(gameTimers[roomName]);
-        delete gameTimers[roomName];
-      }
-      if (gameTimers[roomName + "_duration"]) {
-        clearTimeout(gameTimers[roomName + "_duration"]);
-        delete gameTimers[roomName + "_duration"];
-      }
-      
-      const now = new Date().toISOString();
-      const gameDurationSeconds = Math.floor((Date.now() - (room.gameStartTime || Date.now())) / 1000);
-      
-      const playerData = room.players.map(p => ({
-        uid: p.uid,
-        name: p.name,
-        money: p.money,
-        position: p.position,
-        properties: p.inventory.properties?.length || 0,
-        surrendered: p.surrendered || false,
-        isWinner: p.uid === winner.uid,
-      }));
-
-      io.to(roomName).emit("game-ended", {
-        winner: {
-          uid: winner.uid,
-          name: winner.name,
-          money: winner.money,
-          properties: winner.inventory.properties?.length || 0,
-        },
-        reason: "last-standing",
-        roomName,
-        gameDurationSeconds,
-        minDurationMet: room.minDurationMet || false,
-        totalPlayers: room.players.length,
-        players: playerData,
-        endedAt: now,
-      });
-
-      // Update stats and reward
-      if (!room.statsUpdated) {
-        room.statsUpdated = true;
-        const gameTimestamp = room.gameStartTime || Date.now();
-        const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
-        
-        const allPlayers = room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered, isBot: p.isBot }));
-        console.log(`📊 Updating stats for game ${gameId}. Winner: ${winner.name}. All players:`, allPlayers.map(p => `${p.name}(${p.uid.slice(0,8)})`).join(', '));
-        
-        updatePlayerStats(
-          { uid: winner.uid, name: winner.name },
-          allPlayers,
-          gameId
-        );
-        
-        const coinsCost = room.gameRules?.coinsCost ?? 0;
-        console.log(`💰 Coins cost for this game: ${coinsCost}. Total players: ${room.players.length}`);
-        if (coinsCost > 0) {
-          const expectedWinnerReward = (room.originalPlayerCount || room.players.length) * coinsCost;
-          console.log(`💰 Expected winner reward: ${expectedWinnerReward} (${room.originalPlayerCount || room.players.length} players × ${coinsCost} coins)`);
-          rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount).then(({ winnerReward }) => {
-            console.log(`💰 Actual winner reward: ${winnerReward}`);
-            if (winnerReward > 0) {
-              broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
-            }
-          });
-        }
-      }
+    // Check if game should end
+    const winCheck = checkWinCondition(roomName);
+    if (winCheck.hasWinner && winCheck.winner) {
+      endGame(roomName, winCheck.winner, "last-standing");
     } else {
       // Pass turn to next active player if current player surrendered
       const currentIndex = room.players.findIndex((p) => p.uid === uid);
@@ -1089,42 +986,10 @@ io.on("connection", (socket) => {
       ownerName: owner?.name || "Bank",
     });
 
-    // Check if game should end - inline check using local rooms
-    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
-    const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
-    if (activePlayers.length === 1 && !room.statsUpdated) {
-      const winner = activePlayers[0];
-      console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (last-standing after bankruptcy)`);
-      
-      room.status = "finished";
-      room.winner = winner.uid;
-      
-      if (gameTimers[roomName]) { clearTimeout(gameTimers[roomName]); delete gameTimers[roomName]; }
-      if (gameTimers[roomName + "_duration"]) { clearTimeout(gameTimers[roomName + "_duration"]); delete gameTimers[roomName + "_duration"]; }
-      
-      const gameDurationSeconds = Math.floor((Date.now() - (room.gameStartTime || Date.now())) / 1000);
-      io.to(roomName).emit("game-ended", {
-        winner: { uid: winner.uid, name: winner.name, money: winner.money, properties: winner.inventory.properties?.length || 0 },
-        reason: "last-standing",
-        roomName,
-        gameDurationSeconds,
-        minDurationMet: room.minDurationMet || false,
-        totalPlayers: room.players.length,
-        players: room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, position: p.position, properties: p.inventory.properties?.length || 0, surrendered: p.surrendered || false, bankrupt: p.bankrupt || false, isWinner: p.uid === winner.uid })),
-        endedAt: new Date().toISOString(),
-      });
-      
-      if (!room.statsUpdated) {
-        room.statsUpdated = true;
-        const gameId = `${roomName}_${room.gameStartTime || Date.now()}_${winner.uid}`;
-        updatePlayerStats({ uid: winner.uid, name: winner.name }, room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })), gameId);
-        const coinsCost = room.gameRules?.coinsCost ?? 0;
-        if (coinsCost > 0) {
-          rewardPlayers(winner.uid, room.players, coinsCost).then(({ winnerReward }) => {
-            if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
-          });
-        }
-      }
+    // Check if game should end
+    const winCheck = checkWinCondition(roomName);
+    if (winCheck.hasWinner && winCheck.winner) {
+      endGame(roomName, winCheck.winner, "last-standing");
     } else {
       // Pass turn to next active player
       const currentIndex = room.players.findIndex((p) => p.uid === uid);
@@ -1503,6 +1368,10 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
 
     // Clear buildings
     propertyBuildings[roomName] = {};
+    
+    // Initialize turn timer
+    room.lastTurnTimestamp = Date.now();
+    room.players.forEach(p => p.missedTurns = 0);
 
     // Start game timers (inline - using local rooms, NOT gameState.ts rooms)
     // ---- Minimum duration timer (1 min) for ranking qualification ----
@@ -1616,6 +1485,9 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     const currentIndex = room.players.findIndex((p) => p.uid === uid);
     if (currentIndex === -1) return;
     const player = room.players[currentIndex];
+    
+    // Reset missed turns since they are taking action
+    player.missedTurns = 0;
 
     // Move player
     const oldPos = player.position;
@@ -1844,6 +1716,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     }));
 
     // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now(); // Update timer for next player
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextPlayerIndex].uid,
       nextPlayerIndex: nextPlayerIndex,
@@ -1942,6 +1815,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     console.log(`✅ Active players count: ${activePlayers.length}, active uid: ${activePlayers[0]?.uid}`);
     
     // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now(); // Update timer for next player
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
@@ -2027,6 +1901,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     }));
 
     // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now(); // Update timer for next player
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
@@ -2427,6 +2302,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     }));
 
     // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now(); // Update timer for next player
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
@@ -3220,6 +3096,67 @@ setInterval(() => {
     const room = rooms[roomName];
     if (room.status === "in-game") {
       const activePlayer = room.players.find(p => p.isActive);
+      
+      // Turn Timeout Logic (30 seconds)
+      if (activePlayer && !activePlayer.isBot && !activePlayer.disconnected && !activePlayer.bankrupt && !activePlayer.surrendered) {
+        const turnDuration = Date.now() - (room.lastTurnTimestamp || Date.now());
+        if (turnDuration > 30000) { // 30 seconds timeout
+            console.log(`⏱️ Turn timeout for ${activePlayer.name} in ${roomName}`);
+            activePlayer.missedTurns = (activePlayer.missedTurns || 0) + 1;
+            
+            if (activePlayer.missedTurns >= 2) {
+              console.log(`💀 Player ${activePlayer.name} missed 2 turns. Auto-eliminating.`);
+              activePlayer.bankrupt = true;
+              activePlayer.surrendered = true;
+              activePlayer.money = 0;
+              activePlayer.isActive = false;
+              
+              // Return all properties and cards to bank
+              returnAssetsToBank(roomName, activePlayer);
+              
+              // Emit surrender event to trigger UI removal/updates
+              io.to(roomName).emit("player-surrendered", {
+                  uid: activePlayer.uid,
+                  name: activePlayer.name,
+                  message: `${activePlayer.name} has been eliminated for being inactive (missed 10 turns).`,
+              });
+              
+              // Emit bankrupt event for consistency
+              io.to(roomName).emit("player-bankrupt", {
+                  uid: activePlayer.uid,
+                  name: activePlayer.name,
+                  reason: "AFK (10 missed turns)",
+              });
+              
+              const winCheck = checkWinCondition(roomName);
+              if (winCheck.hasWinner && winCheck.winner) {
+                  endGame(roomName, winCheck.winner, "last-standing");
+              }
+            }
+            
+            // Pass turn to next player
+            const currentIndex = room.players.findIndex(p => p.uid === activePlayer.uid);
+            let nextIndex = (currentIndex + 1) % room.players.length;
+            let loops = 0;
+            while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
+                nextIndex = (nextIndex + 1) % room.players.length;
+                loops++;
+            }
+            
+            room.players = room.players.map((p, i) => ({
+                ...p,
+                isActive: i === nextIndex
+            }));
+            
+            room.lastTurnTimestamp = Date.now();
+            io.to(roomName).emit("next-turn", {
+                nextPlayerUid: room.players[nextIndex].uid,
+                nextPlayerIndex: nextIndex
+            });
+            io.to(roomName).emit("update-rooms", rooms);
+        }
+      }
+
       if (activePlayer && activePlayer.isBot) {
         const botKey = `${roomName}_${activePlayer.uid}`;
         // Skip if already processing or still animating
