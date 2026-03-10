@@ -1,7 +1,27 @@
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 
-dotenv.config({ path: '../monopoloy-project/.env.local' });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Try multiple locations for .env files to support both local and production layouts
+const envLocations = [
+  path.join(process.cwd(), '.env'),
+  path.join(process.cwd(), '.env.local'),
+  path.join(process.cwd(), '../monopoloy-project/.env.local'),
+  path.join(__dirname, '../../.env'),
+];
+
+for (const location of envLocations) {
+  if (fs.existsSync(location)) {
+    dotenv.config({ path: location });
+    console.log(`✅ Loaded environment from: ${location}`);
+    break;
+  }
+}
 
 const databaseUrl = process.env.DATABASE_URL?.includes('?') 
   ? `${process.env.DATABASE_URL}&sslmode=require` 
@@ -12,7 +32,12 @@ export const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://localhost:3000";
+// Detect production domain or fallback to localhost
+const DEFAULT_API_URL = process.env.NODE_ENV === 'production' 
+  ? "https://myanmarpoly.online" 
+  : "http://localhost:3000";
+
+const CLIENT_API_URL = process.env.CLIENT_API_URL || DEFAULT_API_URL;
 
 export const updatePlayerStats = async (winner: any, players: any[], gameId?: string) => {
   try {
@@ -40,27 +65,31 @@ export const updatePlayerStats = async (winner: any, players: any[], gameId?: st
 };
 
 export const fetchPlayerWins = async (uid: string): Promise<number> => {
+  const url = `${CLIENT_API_URL}/api/player-stats?uid=${uid}`;
   try {
-    const response = await fetch(`${CLIENT_API_URL}/api/player-stats?uid=${uid}`, {
+    console.log(`📡 Fetching wins from: ${url}`);
+    const response = await fetch(url, {
       headers: {
         "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
       }
     });
     if (!response.ok) {
-      console.error(`Failed to fetch stats for ${uid}:`, await response.text());
+      console.error(`❌ API error (${response.status}) fetching stats for ${uid}:`, await response.text());
       return 0;
     }
     const data = await response.json();
+    console.log(`✅ Fetched wins for ${uid}: ${data.wins || 0}`);
     return data.wins || 0;
   } catch (error) {
-    console.error(`\u274c Error fetching wins for ${uid}:`, error);
+    console.error(`❌ Network error fetching wins from ${url}:`, error);
     return 0;
   }
 };
 
 export const getPlayerCoins = async (uid: string): Promise<number> => {
+  const url = `${CLIENT_API_URL}/api/player-economy?uid=${uid}`;
   try {
-    const response = await fetch(`${CLIENT_API_URL}/api/player-economy?uid=${uid}`, {
+    const response = await fetch(url, {
       headers: {
         "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
       }
@@ -69,7 +98,7 @@ export const getPlayerCoins = async (uid: string): Promise<number> => {
     const data = await response.json();
     return data.coins || 0;
   } catch (error) {
-    console.error(`\u274c Error fetching coins for ${uid}:`, error);
+    console.error(`❌ Network error fetching coins from ${url}:`, error);
     return 0;
   }
 };
@@ -95,19 +124,23 @@ export const deductCoins = async (uid: string, amount: number): Promise<boolean>
 };
 
 export const fetchPlayerEconomy = async (uid: string) => {
+  const url = `${CLIENT_API_URL}/api/player-economy?uid=${uid}`;
   try {
-    const response = await fetch(`${CLIENT_API_URL}/api/player-economy?uid=${uid}`, {
+    console.log(`📡 Fetching economy from: ${url}`);
+    const response = await fetch(url, {
       headers: {
         "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
       }
     });
     if (!response.ok) {
-      console.error(`Failed to fetch economy for ${uid}:`, await response.text());
+      console.error(`❌ API error (${response.status}) fetching economy for ${uid}:`, await response.text());
       return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
     }
-    return await response.json();
+    const data = await response.json();
+    console.log(`✅ Fetched economy for ${uid}: ${data.coins} coins, skin: ${data.dice_skin}`);
+    return data;
   } catch (error) {
-    console.error(`Failed to fetch economy for ${uid}:`, error);
+    console.error(`❌ Network error fetching economy from ${url}:`, error);
   }
   return { coins: 0, gems: 0, dice_skin: 'default', board_theme: 'default', avatar: 'default' };
 };

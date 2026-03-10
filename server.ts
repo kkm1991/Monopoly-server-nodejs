@@ -3,17 +3,42 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 
-// Load environment variables
-dotenv.config({ path: '../monopoloy-project/.env.local' });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Try multiple locations for .env files to support both local and production layouts
+const envLocations = [
+  path.join(process.cwd(), '.env'),
+  path.join(process.cwd(), '.env.local'),
+  path.join(process.cwd(), '../monopoloy-project/.env.local'),
+  path.join(__dirname, '../../.env'),
+];
+
+for (const location of envLocations) {
+  if (fs.existsSync(location)) {
+    dotenv.config({ path: location });
+    console.log(`✅ Loaded environment from: ${location}`);
+    break;
+  }
+}
 
 import { updatePlayerStats, fetchPlayerWins, fetchPlayerEconomy, rewardPlayers } from './src/services/dbService.js';
 
 const app = express();
-const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000";
+const NODE_ENV = process.env.NODE_ENV || "development";
+const isProdLike = NODE_ENV === 'production' || 
+                   process.env.CLIENT_API_URL?.includes('myanmarpoly') || 
+                   process.env.CLIENT_API_URL?.includes('khaingkyawmin');
 
-// Client API URL for storing player stats
-// const CLIENT_API_URL = process.env.CLIENT_API_URL || "http://127.0.0.1:3000"; // This line is a duplicate and can be removed if not intended. Keeping it as per original document structure.
+const DEFAULT_API_URL = isProdLike
+  ? (process.env.CLIENT_API_URL || "https://myanmarpoly.online")
+  : "http://127.0.0.1:3000";
+
+const CLIENT_API_URL = process.env.CLIENT_API_URL || DEFAULT_API_URL;
 
 // ================= DATABASE / PERSISTENCE =================
 // Using client-side Neon PostgreSQL via API calls
@@ -58,19 +83,30 @@ app.get("/api/player/:uid/stats", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-const NODE_ENV = process.env.NODE_ENV || "development";
 // Voice feature tracking (module level)
 const voiceChannels: Record<string, Set<string>> = {};
 const voiceMessageChunks: Record<string, { chunks: Buffer[]; timestamp: number }> = {};
+// Configure CORS with dynamic origin matching for credentials support
+const allowedOrigins = [
+  "https://monopoly-project-phi.vercel.app",
+  "https://www.myanmarpoly.online",
+  "https://myanmarpoly.online",
+  "https://khaingkyawmin.com",
+  "https://www.khaingkyawmin.com",
+  "https://socket.khaingkyawmin.com"
+];
 
-// Configure CORS based on environment
-const corsOrigins = NODE_ENV === "production" 
-  ? (process.env.CORS_ORIGINS?.split(",") || [
-      "https://monopoly-project-phi.vercel.app",
-      "https://www.myanmarpoly.online",
-      "https://myanmarpoly.online"
-    ])
-  : "*";
+const corsOrigins = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+  // Allow requests with no origin (like mobile apps or curl)
+  if (!origin) return callback(null, true);
+  
+  if (allowedOrigins.includes(origin) || NODE_ENV !== "production") {
+    callback(null, true);
+  } else {
+    console.warn(`🚫 CORS blocked origin: ${origin}`);
+    callback(new Error("Not allowed by CORS"));
+  }
+};
 
 // Apply CORS middleware to Express app for HTTP API endpoints
 app.use(cors({
@@ -821,30 +857,36 @@ io.on("connection", (socket) => {
     }));
     const totalPlayersBeforeLeave = room.players.length;
     
-    // Return assets to bank if game is in progress and player is leaving
+    // Mark player as disconnected instead of removing them if game is in progress
     if (leavingPlayer && room.status === "in-game") {
+      console.log(`📡 ${leavingPlayer.name} left the room during game - marking as surrendered/disconnected`);
       returnAssetsToBank(roomName, leavingPlayer);
-    }
-    
-    room.players = room.players.filter((p) => p.uid !== uid);
-    socket.leave(roomName);
-
-    // Delete room when empty
-    if (room.players.length === 0) {
-      delete rooms[roomName];
-      console.log(`🗑️ Room "${roomName}" deleted - no players left`);
-    }
-
-    // Check if game should end (player left during active game)
-    if (room && room.status === "in-game") {
+      leavingPlayer.surrendered = true;
+      leavingPlayer.disconnected = true;
+      leavingPlayer.isActive = false;
+      
+      // Check if this leaves only 1 active player
       const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
       if (activePlayers.length === 1) {
         const winner = activePlayers[0];
         console.log(`🏆 Game ending in ${roomName} (player left)`);
         endGame(roomName, winner, "last-standing");
+      } else if (leavingPlayer.uid === room.players.find(p => p.isActive)?.uid) {
+        // If it was their turn, pass it
+        // ... handled by next-turn logic or interval
+      }
+    } else {
+      // Pre-game or post-game: actually remove them
+      room.players = room.players.filter((p) => p.uid !== uid);
+      
+      // Delete room when empty
+      if (room.players.length === 0) {
+        delete rooms[roomName];
+        console.log(`🗑️ Room "${roomName}" deleted - no players left`);
       }
     }
 
+    socket.leave(roomName);
     emitRooms();
   });
 
@@ -2937,14 +2979,14 @@ setInterval(() => {
               io.to(roomName).emit("player-surrendered", {
                   uid: activePlayer.uid,
                   name: activePlayer.name,
-                  message: `${activePlayer.name} has been eliminated for being inactive (missed 10 turns).`,
+                  message: `${activePlayer.name} has been eliminated for being inactive (missed 2 turns).`,
               });
               
               // Emit bankrupt event for consistency
               io.to(roomName).emit("player-bankrupt", {
                   uid: activePlayer.uid,
                   name: activePlayer.name,
-                  reason: "AFK (10 missed turns)",
+                  reason: "AFK (2 missed turns)",
               });
               
               const winCheck = checkWinCondition(roomName);

@@ -150,7 +150,7 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
     roomName,
     gameDurationSeconds,
     minDurationMet: room.minDurationMet || false,
-    totalPlayers: room.players.length,
+    totalPlayers: room.originalPlayerCount || room.players.length,
     players: playerData,
     endedAt: now,
   });
@@ -184,7 +184,7 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
   } else {
     console.log(`\u23ed\ufe0f Game ended too early (${gameDurationSeconds}s). Stats and coins NOT updated.`);
     broadcastToRoom(roomName, "game-ended-early", { 
-      message: "၅ မိနစ်ထက်ပိုမကြာသောကြောင့် Rankings score များမပေါင်းပေးပါ။",
+      message: "၅ မိနစ်ထက်ပိုမကြာသောကြောင့် coins မရပါ Rankings score သာရမည်။",
       durationSeconds: gameDurationSeconds
     });
   }
