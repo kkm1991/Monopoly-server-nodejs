@@ -836,46 +836,12 @@ io.on("connection", (socket) => {
     }
 
     // Check if game should end (player left during active game)
-    // Only proceed if stats haven't been updated yet (prevent double-processing from endGame)
-    if (room && room.status === "in-game" && !room.statsUpdated) {
+    if (room && room.status === "in-game") {
       const activePlayers = room.players.filter(p => !p.surrendered && !p.bankrupt);
       if (activePlayers.length === 1) {
         const winner = activePlayers[0];
-        room.status = "finished";
-        room.winner = winner.uid;
-        if (gameTimers[roomName]) { clearTimeout(gameTimers[roomName]); delete gameTimers[roomName]; }
-        if (gameTimers[roomName + "_duration"]) { clearTimeout(gameTimers[roomName + "_duration"]); delete gameTimers[roomName + "_duration"]; }
-        
-        console.log(`🏆 Game ended in ${roomName}! Winner: ${winner.name} (last-standing after player left)`);
-        
-        const gameDurationSeconds = Math.floor((Date.now() - (room.gameStartTime || Date.now())) / 1000);
-        io.to(roomName).emit("game-ended", {
-          winner: { uid: winner.uid, name: winner.name, money: winner.money, properties: winner.inventory.properties?.length || 0 },
-          reason: "last-standing",
-          roomName,
-          gameDurationSeconds,
-          minDurationMet: room.minDurationMet || false,
-          totalPlayers: totalPlayersBeforeLeave,
-          players: allPlayersBeforeLeave.map(p => ({ ...p, isWinner: p.uid === winner.uid })),
-          endedAt: new Date().toISOString(),
-        });
-        
-        if (!room.statsUpdated) {
-          room.statsUpdated = true;
-          const gameId = `${roomName}_${room.gameStartTime || Date.now()}_${winner.uid}`;
-          console.log(`📊 Updating stats (leave-room). Winner: ${winner.name}. All players:`, allPlayersBeforeLeave.map(p => `${p.name}(${p.uid.slice(0,8)})`).join(', '));
-          updatePlayerStats(
-            { uid: winner.uid, name: winner.name }, 
-            allPlayersBeforeLeave,
-            gameId
-          );
-          const coinsCost = room.gameRules?.coinsCost ?? 0;
-          if (coinsCost > 0) {
-            rewardPlayers(winner.uid, allPlayersBeforeLeave, coinsCost, room.originalPlayerCount).then(({ winnerReward }) => {
-              if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: winner.uid });
-            });
-          }
-        }
+        console.log(`🏆 Game ending in ${roomName} (player left)`);
+        endGame(roomName, winner, "last-standing");
       }
     }
 
@@ -915,30 +881,30 @@ io.on("connection", (socket) => {
     // Check if game should end
     const winCheck = checkWinCondition(roomName);
     if (winCheck.hasWinner && winCheck.winner) {
+      console.log(`🏆 Game ending in ${roomName} (surrender)`);
       endGame(roomName, winCheck.winner, "last-standing");
     } else {
       // Pass turn to next active player if current player surrendered
       const currentIndex = room.players.findIndex((p) => p.uid === uid);
-      const nextIndex = (currentIndex + 1) % room.players.length;
+      let nextIndex = (currentIndex + 1) % room.players.length;
       
-      // Find next non-surrendered player
-      let nextPlayerIndex = nextIndex;
+      // Find next non-surrendered/non-bankrupt/non-disconnected player
       let loops = 0;
-      while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
-        nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+      while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
+        nextIndex = (nextIndex + 1) % room.players.length;
         loops++;
       }
       
-      if (!room.players[nextPlayerIndex]?.surrendered && !room.players[nextPlayerIndex]?.bankrupt) {
+      if (!room.players[nextIndex]?.surrendered && !room.players[nextIndex]?.bankrupt && !room.players[nextIndex]?.disconnected) {
         room.players = room.players.map((p, i) => ({
           ...p,
-          isActive: i === nextPlayerIndex,
+          isActive: i === nextIndex,
         }));
         
         // Emit explicit next-turn event for reliable turn synchronization
         io.to(roomName).emit("next-turn", {
-          nextPlayerUid: room.players[nextPlayerIndex].uid,
-          nextPlayerIndex: nextPlayerIndex,
+          nextPlayerUid: room.players[nextIndex].uid,
+          nextPlayerIndex: nextIndex,
         });
       }
       
@@ -989,30 +955,30 @@ io.on("connection", (socket) => {
     // Check if game should end
     const winCheck = checkWinCondition(roomName);
     if (winCheck.hasWinner && winCheck.winner) {
+      console.log(`🏆 Game ending in ${roomName} (bankruptcy)`);
       endGame(roomName, winCheck.winner, "last-standing");
     } else {
       // Pass turn to next active player
       const currentIndex = room.players.findIndex((p) => p.uid === uid);
-      const nextIndex = (currentIndex + 1) % room.players.length;
+      let nextIndex = (currentIndex + 1) % room.players.length;
       
-      // Find next non-surrendered/non-bankrupt player
-      let nextPlayerIndex = nextIndex;
+      // Find next non-surrendered/non-bankrupt/non-disconnected player
       let loops = 0;
-      while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
-        nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
+      while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
+        nextIndex = (nextIndex + 1) % room.players.length;
         loops++;
       }
       
-      if (!room.players[nextPlayerIndex]?.surrendered && !room.players[nextPlayerIndex]?.bankrupt) {
+      if (!room.players[nextIndex]?.surrendered && !room.players[nextIndex]?.bankrupt && !room.players[nextIndex]?.disconnected) {
         room.players = room.players.map((p, i) => ({
           ...p,
-          isActive: i === nextPlayerIndex,
+          isActive: i === nextIndex,
         }));
         
         // Emit explicit next-turn event for reliable turn synchronization
         io.to(roomName).emit("next-turn", {
-          nextPlayerUid: room.players[nextPlayerIndex].uid,
-          nextPlayerIndex: nextPlayerIndex,
+          nextPlayerUid: room.players[nextIndex].uid,
+          nextPlayerIndex: nextIndex,
         });
       }
       
@@ -1021,79 +987,8 @@ io.on("connection", (socket) => {
   });
 
   // ================= Pay Debt After Selling Properties =================
-  socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
-    const room = rooms[roomName];
-    if (!room || room.status !== "in-game") {
-      socket.emit("error", "Cannot pay debt - game not in progress");
-      return;
-    }
-
-    const player = room.players.find((p) => p.uid === uid);
-    const owner = room.players.find((p) => p.uid === ownerUid);
-    if (!player) {
-      socket.emit("error", "Player not found");
-      return;
-    }
-
-    // Check if player has enough money to pay
-    if (player.money < amount) {
-      socket.emit("error", "Not enough money to pay debt");
-      return;
-    }
-
-    // Deduct money from player and pay owner
-    player.money -= amount;
-    if (owner) {
-      owner.money += amount;
-    }
-
-    console.log(`💰 ${player.name} paid Ks ${amount} debt to ${owner?.name || 'bank'}`);
-
-    // Emit rent-paid event to show payment
-    io.to(roomName).emit("rent-paid", {
-      fromUid: player.uid,
-      toUid: ownerUid,
-      propertyIndex: propertyIndex,
-      amount: amount,
-      isPartial: false,
-      isDebtPayment: true,
-    });
-
-    // Pass turn to next player
-    const currentIndex = room.players.findIndex((p) => p.uid === uid);
-    const nextIndex = (currentIndex + 1) % room.players.length;
-    
-    // Find next non-surrendered/non-bankrupt player
-    let nextPlayerIndex = nextIndex;
-    let loops = 0;
-    while ((room.players[nextPlayerIndex]?.surrendered || room.players[nextPlayerIndex]?.bankrupt) && loops < room.players.length) {
-      nextPlayerIndex = (nextPlayerIndex + 1) % room.players.length;
-      loops++;
-    }
-    
-    if (!room.players[nextPlayerIndex]?.surrendered && !room.players[nextPlayerIndex]?.bankrupt) {
-      room.players = room.players.map((p, i) => ({
-        ...p,
-        isActive: i === nextPlayerIndex,
-      }));
-    }
-
-    // Emit explicit next-turn event for reliable turn synchronization
-    io.to(roomName).emit("next-turn", {
-      nextPlayerUid: room.players[nextPlayerIndex]?.uid || uid,
-      nextPlayerIndex: nextPlayerIndex,
-    });
-
-    io.to(roomName).emit("move-result", {
-      uid,
-      from: player.position,
-      to: player.position,
-      money: player.money,
-      nextPlayerUid: room.players[nextPlayerIndex]?.uid || uid,
-    });
-
-    io.to(roomName).emit("update-rooms", rooms);
-  });
+  // This handler is now redundant as there's another one at line 1058
+  // I will remove it to avoid confusion and ensure we use the centralized one.
 
   // Kick player (only room creator, only before game starts)
   socket.on("kick-player", ({ roomName, uid }) => {
@@ -1151,7 +1046,7 @@ socket.on("animation-start", ({ roomName, uid }) => {
 // ================= Pay Debt =================
 socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
   const room = rooms[roomName];
-  if (!room) return;
+  if (!room || room.status !== "in-game") return;
 
   const player = room.players.find((p) => p.uid === uid);
   const owner = room.players.find((p) => p.uid === ownerUid);
@@ -1172,7 +1067,7 @@ socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
     const currentIndex = room.players.findIndex((p) => p.uid === uid);
     let nextIndex = (currentIndex + 1) % room.players.length;
     let loops = 0;
-    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
       nextIndex = (nextIndex + 1) % room.players.length;
       loops++;
     }
@@ -1345,7 +1240,6 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     // Fetch wins for all players from the database
     const playerWinsPromises = room.players.map((p) => fetchPlayerWins(p.uid));
     const playerWins = await Promise.all(playerWinsPromises);
-    
     // Set first human player as active (or first bot if no humans)
     const firstHumanIndex = room.players.findIndex((p: any) => !p.isBot);
     const startingIndex = firstHumanIndex !== -1 ? firstHumanIndex : 0;
@@ -1373,90 +1267,10 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     room.lastTurnTimestamp = Date.now();
     room.players.forEach(p => p.missedTurns = 0);
 
-    // Start game timers (inline - using local rooms, NOT gameState.ts rooms)
-    // ---- Minimum duration timer (1 min) for ranking qualification ----
-    if (gameTimers[roomName]) { clearTimeout(gameTimers[roomName]); }
-    if (gameTimers[roomName + "_duration"]) { clearTimeout(gameTimers[roomName + "_duration"]); }
-    
-    gameTimers[roomName] = setTimeout(() => {
-      const r = rooms[roomName];
-      if (!r || r.status !== "in-game") return;
-      
-      r.minDurationMet = true;
-      console.log(`⏱️ Minimum 1-minute duration met for ${roomName} - games now qualify for rankings`);
-      
-      // Check if someone already won while waiting for min duration
-      const activePlayersNow = r.players.filter(p => !p.surrendered && !p.bankrupt);
-      if (activePlayersNow.length === 1) {
-        const w = activePlayersNow[0];
-        r.status = "finished";
-        r.winner = w.uid;
-        const dur = Math.floor((Date.now() - (r.gameStartTime || Date.now())) / 1000);
-        io.to(roomName).emit("game-ended", {
-          winner: { uid: w.uid, name: w.name, money: w.money, properties: w.inventory.properties?.length || 0 },
-          reason: "last-standing", roomName, gameDurationSeconds: dur,
-          minDurationMet: true, totalPlayers: r.players.length,
-          players: r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, position: p.position, properties: p.inventory.properties?.length || 0, surrendered: p.surrendered || false, isWinner: p.uid === w.uid })),
-          endedAt: new Date().toISOString(),
-        });
-        if (!r.statsUpdated) {
-          r.statsUpdated = true;
-          const gId = `${roomName}_${r.gameStartTime || Date.now()}_${w.uid}`;
-          updatePlayerStats({ uid: w.uid, name: w.name }, r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })), gId);
-          const cc = r.gameRules?.coinsCost ?? 0;
-          if (cc > 0) {
-            rewardPlayers(w.uid, r.players, cc, r.originalPlayerCount).then(({ winnerReward }) => {
-              if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: w.uid });
-            });
-          }
-        }
-      }
-    }, 1 * 60 * 1000);
-    console.log(`⏱️ 1-minute minimum duration timer started for ${roomName}`);
+    // Start centralized game timers
+    startGameTimer(roomName);
 
-    // ---- Custom Game Rules Timer ----
-    const customTimerMinutes = room.gameRules?.timer;
-    if (customTimerMinutes && customTimerMinutes !== "unlimited") {
-      const timerMs = (customTimerMinutes as number) * 60 * 1000;
-      gameTimers[roomName + "_duration"] = setTimeout(() => {
-        const r = rooms[roomName];
-        if (!r || r.status !== "in-game") return;
-        console.log(`⏱️ Custom timer (${customTimerMinutes}m) ended for ${roomName}`);
-        
-        const activeP = r.players.filter(p => !p.surrendered && !p.bankrupt);
-        if (activeP.length === 0) return;
-        
-        let wealthiest = activeP[0];
-        let maxW = -1;
-        for (const p of activeP) {
-          const wealth = p.money + (p.inventory?.properties?.length || 0) * 100;
-          if (wealth > maxW) { maxW = wealth; wealthiest = p; }
-        }
-        
-        r.status = "finished";
-        r.winner = wealthiest.uid;
-        const dur = Math.floor((Date.now() - (r.gameStartTime || Date.now())) / 1000);
-        io.to(roomName).emit("game-ended", {
-          winner: { uid: wealthiest.uid, name: wealthiest.name, money: wealthiest.money, properties: wealthiest.inventory.properties?.length || 0 },
-          reason: "time-limit", roomName, gameDurationSeconds: dur,
-          minDurationMet: r.minDurationMet || false, totalPlayers: r.players.length,
-          players: r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, position: p.position, properties: p.inventory.properties?.length || 0, surrendered: p.surrendered || false, isWinner: p.uid === wealthiest.uid })),
-          endedAt: new Date().toISOString(),
-        });
-        if (!r.statsUpdated) {
-          r.statsUpdated = true;
-          const gId = `${roomName}_${r.gameStartTime || Date.now()}_${wealthiest.uid}`;
-          updatePlayerStats({ uid: wealthiest.uid, name: wealthiest.name }, r.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })), gId);
-          const cc = r.gameRules?.coinsCost ?? 0;
-          if (cc > 0) {
-            rewardPlayers(wealthiest.uid, r.players, cc, r.originalPlayerCount).then(({ winnerReward }) => {
-              if (winnerReward > 0) broadcastToRoom(roomName, "coins-awarded", { amount: winnerReward, winnerUid: wealthiest.uid });
-            });
-          }
-        }
-      }, timerMs);
-      console.log(`⏱️ Custom game timer started: ${customTimerMinutes} minutes for ${roomName}`);
-    }
+    // Emit explicit next-turn event for reliable turn synchronization when game starts
 
     // Emit explicit next-turn event for reliable turn synchronization when game starts
     io.to(roomName).emit("next-turn", {
@@ -2437,24 +2251,28 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
   });
 
   // ================= Update Player Cosmetics =================
-  socket.on("update-cosmetics", async ({ roomName, uid }) => {
+  socket.on("update-cosmetics", async ({ roomName, uid, equippedItems }) => {
     const room = rooms[roomName];
     if (!room) return;
 
     const player = room.players.find((p) => p.uid === uid);
     if (player) {
-      // Assuming fetchPlayerEconomy is an async function available in this scope
-      // and returns an object with dice_skin, board_theme, avatar, effect properties.
-      // This function would typically interact with a database or external service.
-      const economyAndCosmetics = await fetchPlayerEconomy(uid); 
-      player.equippedItems = {
-        dice_skin: economyAndCosmetics.dice_skin,
-        board_theme: economyAndCosmetics.board_theme,
-        avatar: economyAndCosmetics.avatar,
-      };
+      if (equippedItems) {
+        // 1. Update immediately with data from client for instant sync
+        player.equippedItems = equippedItems;
+        console.log(`✨ Player ${player.name} updated their cosmetics INSTANTLY mid-game!`);
+      } else {
+        // 2. Fallback to background fetch if client didn't provide data
+        const economyAndCosmetics = await fetchPlayerEconomy(uid); 
+        player.equippedItems = {
+          dice_skin: economyAndCosmetics.dice_skin,
+          board_theme: economyAndCosmetics.board_theme,
+          avatar: economyAndCosmetics.avatar,
+        };
+        console.log(`✨ Player ${player.name} updated their cosmetics via background fetch mid-game!`);
+      }
       
       io.to(roomName).emit("update-rooms", rooms);
-      console.log(`✨ Player ${player.name} updated their cosmetics mid-game!`);
     }
   });
 
@@ -2753,6 +2571,7 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
             p => !p.surrendered && !p.bankrupt && !p.disconnected
           );
           if (activePlayers.length === 1 && rooms[roomName].minDurationMet) {
+            console.log(`🏆 Game ending in ${roomName} (all others disconnected)`);
             endGame(roomName, activePlayers[0], "last-standing");
           }
         }

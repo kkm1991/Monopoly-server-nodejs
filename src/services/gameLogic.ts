@@ -159,13 +159,19 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
   console.log(`\u23f1\ufe0f Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
 
   if (room.minDurationMet) {
-    const gameTimestamp = room.gameStartTime || Date.now();
-    const gameId = `${roomName}_${gameTimestamp}_${winner.uid}`;
+    // Standardize gameId generation to be more stable
+    const gameId = `${roomName}_${room.gameStartTime || Date.now()}`;
     console.log(`📊 Updating stats for game: ${gameId}`);
     
     await updatePlayerStats(
       { uid: winner.uid, name: winner.name },
-      room.players.map(p => ({ uid: p.uid, name: p.name, money: p.money, surrendered: p.surrendered })),
+      room.players.map(p => ({ 
+        uid: p.uid, 
+        name: p.name, 
+        money: p.money, 
+        surrendered: p.surrendered,
+        isBot: p.isBot
+      })),
       gameId
     );
 
