@@ -862,7 +862,8 @@ io.on("connection", (socket) => {
     }));
     const totalPlayersBeforeLeave = room.players.length;
     
-    // Mark player as disconnected instead of removing them if game is in progress
+    // 1. Mark player as disconnected/surrendered if game is in progress
+    // 2. OR remove them immediately if game is NOT in progress OR already finished
     if (leavingPlayer && room.status === "in-game") {
       console.log(`📡 ${leavingPlayer.name} left the room during game - marking as surrendered/disconnected`);
       returnAssetsToBank(roomName, leavingPlayer);
@@ -877,11 +878,12 @@ io.on("connection", (socket) => {
         console.log(`🏆 Game ending in ${roomName} (player left)`);
         endGame(roomName, winner, "last-standing");
       } else if (leavingPlayer.uid === room.players.find(p => p.isActive)?.uid) {
-        // If it was their turn, pass it
-        // ... handled by next-turn logic or interval
+        // If it was their turn, pass it handled by next-turn logic/interval
       }
     } else {
-      // Pre-game or post-game: actually remove them
+      // Pre-game or post-game (finished): actually remove them
+      // This is crucial for cleanup after game ends
+      console.log(`📡 ${leavingPlayer?.name || uid} left room ${roomName} (${room.status}) - removing from player list`);
       room.players = room.players.filter((p) => p.uid !== uid);
       
       // Delete room when empty
@@ -949,9 +951,12 @@ io.on("connection", (socket) => {
         }));
         
         // Emit explicit next-turn event for reliable turn synchronization
+        room.lastTurnTimestamp = Date.now();
         io.to(roomName).emit("next-turn", {
           nextPlayerUid: room.players[nextIndex].uid,
           nextPlayerIndex: nextIndex,
+          lastTurnTimestamp: room.lastTurnTimestamp,
+          turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
         });
       }
       
@@ -1022,10 +1027,11 @@ io.on("connection", (socket) => {
           isActive: i === nextIndex,
         }));
         
-        // Emit explicit next-turn event for reliable turn synchronization
         io.to(roomName).emit("next-turn", {
           nextPlayerUid: room.players[nextIndex].uid,
           nextPlayerIndex: nextIndex,
+          lastTurnTimestamp: room.lastTurnTimestamp,
+          turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
         });
       }
       
@@ -1114,7 +1120,7 @@ socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
     const currentIndex = room.players.findIndex((p) => p.uid === uid);
     let nextIndex = (currentIndex + 1) % room.players.length;
     let loops = 0;
-    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt || room.players[nextIndex]?.disconnected) && loops < room.players.length) {
+    while ((room.players[nextIndex]?.surrendered || room.players[nextIndex]?.bankrupt) && loops < room.players.length) {
       nextIndex = (nextIndex + 1) % room.players.length;
       loops++;
     }
@@ -1124,9 +1130,13 @@ socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
       isActive: i === nextIndex,
     }));
 
+    // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now();
     broadcastToRoom(roomName, "next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
     });
 
     emitRooms();
@@ -1180,9 +1190,13 @@ socket.on("declare-bankruptcy", ({ roomName, uid, ownerUid, debtAmount }) => {
       isActive: i === nextIndex,
     }));
 
+    // Emit explicit next-turn event for reliable turn synchronization
+    room.lastTurnTimestamp = Date.now();
     broadcastToRoom(roomName, "next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
     });
 
     emitRooms();
@@ -1323,6 +1337,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[startingIndex].uid,
       nextPlayerIndex: startingIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[startingIndex].disconnected ? 10 : 30,
     });
 
     io.to(roomName).emit("update-rooms", rooms);
@@ -1581,6 +1597,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextPlayerIndex].uid,
       nextPlayerIndex: nextPlayerIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextPlayerIndex].disconnected ? 10 : 30,
     });
 
     // last move Result
@@ -1680,6 +1698,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
     });
     
     io.to(roomName).emit("update-rooms", rooms);
@@ -1766,6 +1786,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
     });
 
     io.to(roomName).emit("move-result", {
@@ -2167,6 +2189,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
     });
 
     io.to(roomName).emit("update-rooms", rooms);
@@ -2609,9 +2633,12 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
             const nextPlayer = rooms[roomName].players[nextIndex];
             if (nextPlayer && !nextPlayer.surrendered && !nextPlayer.bankrupt && !nextPlayer.disconnected) {
               nextPlayer.isActive = true;
+              rooms[roomName].lastTurnTimestamp = Date.now();
               io.to(roomName).emit("next-turn", {
                 nextPlayerUid: nextPlayer.uid,
                 nextPlayerIndex: nextIndex,
+                lastTurnTimestamp: rooms[roomName].lastTurnTimestamp,
+                turnDuration: nextPlayer.disconnected ? 10 : 30,
               });
             }
           }
@@ -2720,7 +2747,9 @@ const passBotTurn = async (roomName: string, botUid: string) => {
   
   io.to(roomName).emit("next-turn", {
     nextPlayerUid: room.players[nextIndex].uid,
-    nextPlayerIndex: nextIndex
+    nextPlayerIndex: nextIndex,
+    lastTurnTimestamp: room.lastTurnTimestamp,
+    turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
   });
   
   io.to(roomName).emit("update-rooms", rooms);
@@ -3056,7 +3085,9 @@ setInterval(() => {
             room.lastTurnTimestamp = Date.now();
             io.to(roomName).emit("next-turn", {
                 nextPlayerUid: room.players[nextIndex].uid,
-                nextPlayerIndex: nextIndex
+                nextPlayerIndex: nextIndex,
+                lastTurnTimestamp: room.lastTurnTimestamp,
+                turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
             });
             io.to(roomName).emit("update-rooms", rooms);
         }

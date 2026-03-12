@@ -49,12 +49,15 @@ export const emitRooms = () => {
   
   const deduplicatedRooms: Record<string, any> = {};
   for (const [roomName, room] of Object.entries(rooms)) {
+    // Hide finished rooms from the lobby list
+    if (room.status === "finished") continue;
+    
     deduplicatedRooms[roomName] = {
       ...room,
       players: deduplicatePlayers(room.players),
     };
   }
-  ioInstance.emit("update-rooms", deduplicatedRooms);
+  ioInstance.emit("update-rooms", { rooms: deduplicatedRooms, serverTime: Date.now() });
 };
 
 export const emitRoomsToSocket = (socket: Socket) => {
@@ -62,12 +65,15 @@ export const emitRoomsToSocket = (socket: Socket) => {
   
   const deduplicatedRooms: Record<string, any> = {};
   for (const [roomName, room] of Object.entries(rooms)) {
+    // Hide finished rooms from the lobby list
+    if (room.status === "finished") continue;
+    
     deduplicatedRooms[roomName] = {
       ...room,
       players: deduplicatePlayers(room.players),
     };
   }
-  socket.emit("update-rooms", deduplicatedRooms);
+  socket.emit("update-rooms", { rooms: deduplicatedRooms, serverTime: Date.now() });
 };
 
 export const broadcastToRoom = (roomName: string, event: string, data: any) => {
