@@ -14,6 +14,7 @@ export type Player = {
   surrendered?: boolean; // Player surrendered but watching
   bankrupt?: boolean; // Player is bankrupt (lost game but watching)
   disconnected?: boolean; // Player temporarily disconnected (can reconnect)
+  disconnectedAt?: number; // Timestamp of when the player disconnected
   wins?: number; // Total wins for this player
   equippedItems?: {
     dice_skin: string;

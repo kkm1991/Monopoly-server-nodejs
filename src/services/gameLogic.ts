@@ -188,6 +188,45 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
       durationSeconds: gameDurationSeconds
     });
   }
+
+  // --- ROOM CLEANUP LOGIC ---
+  // Wait 60 seconds after game ends, then delete the room and redirect anyone still inside
+  const CLEANUP_TIMEOUT = 60000; // 60 seconds
+  console.log(`🧹 Room cleanup scheduled for "${roomName}" in ${CLEANUP_TIMEOUT/1000}s`);
+  
+  setTimeout(() => {
+    const finalRoom = rooms[roomName];
+    if (!finalRoom) return;
+
+    console.log(`🧹 Executing cleanup for room: ${roomName}`);
+    
+    // 1. Notify all clients still in the room to return to lobby
+    broadcastToRoom(roomName, "kick-to-lobby", { 
+      message: "ဂိမ်းပြီးဆုံးသွားပြီဖြစ်သောကြောင့် Lobby သို့ပြန်ပို့ပေးပါမည်။" 
+    });
+
+    // 2. Clear all timers
+    if (gameTimers[roomName]) {
+      clearTimeout(gameTimers[roomName]);
+      delete gameTimers[roomName];
+    }
+    if (gameTimers[roomName + "_duration"]) {
+      clearTimeout(gameTimers[roomName + "_duration"]);
+      delete gameTimers[roomName + "_duration"];
+    }
+
+    // 3. Delete the room
+    delete rooms[roomName];
+    
+    // 4. Update the lobby list for everyone
+    import('./socketService.js').then(({ getIO }) => {
+        getIO().emit("update-rooms", rooms);
+    }).catch(e => {
+        console.error("Failed to emit room update during cleanup:", e);
+    });
+    
+    console.log(`✅ Room "${roomName}" successfully cleaned up.`);
+  }, CLEANUP_TIMEOUT);
 };
 
 export const startGameTimer = (roomName: string) => {

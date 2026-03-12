@@ -153,10 +153,10 @@ const io = new Server(server, {
   },
   transports: ["websocket", "polling"],
   // Aggressive ping settings to keep Render connection alive
-  pingTimeout: 120000,  // 2 minutes - longer than Render's idle timeout
-  pingInterval: 30000,  // 30 seconds - frequent keep-alive pings
+  pingTimeout: 30000,   // 30 seconds - faster detection of closed browsers
+  pingInterval: 10000,  // 10 seconds - frequent keep-alive pings
   // Connection recovery settings
-  connectTimeout: 60000,
+  connectTimeout: 30000,
   maxHttpBufferSize: 1e6,
   // Allow upgrade from polling to websocket for reliability
   allowUpgrades: true,
@@ -694,6 +694,11 @@ io.on("connection", (socket) => {
     const room = rooms[roomName];
     if (!room) {
       socket.emit("error", "Room does not exist");
+      return;
+    }
+
+    if (room.status === "finished") {
+      socket.emit("error", "ဂိမ်းပြီးဆုံးသွားပြီဖြစ်၍ ဝင်ရောက်၍မရတော့ပါ။");
       return;
     }
 
@@ -2566,54 +2571,66 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
       );
 
       if (disconnectedPlayer) {
-        // 2. Mark player as disconnected instead of removing them
-        disconnectedPlayer.disconnected = true;
-        disconnectedPlayer.socketId = ""; // Clear socketId
-        
-        // If it was their turn, pass to next player
-        if (disconnectedPlayer.isActive && rooms[roomName].status === "in-game") {
-          disconnectedPlayer.isActive = false;
+        // If the room is in 'waiting' status, remove the player immediately
+        if (rooms[roomName].status === "waiting") {
+          console.log(`🗑️ Player ${disconnectedPlayer.name} disconnected in waiting room - removing immediately`);
+          rooms[roomName].players = rooms[roomName].players.filter(p => p.socketId !== socket.id);
           
-          // Find next non-surrendered/non-bankrupt/non-disconnected player
-          const currentIndex = rooms[roomName].players.findIndex((p) => p.uid === disconnectedPlayer.uid);
-          let nextIndex = (currentIndex + 1) % rooms[roomName].players.length;
-          let loops = 0;
-          while (
-            (rooms[roomName].players[nextIndex]?.surrendered || 
-             rooms[roomName].players[nextIndex]?.bankrupt ||
-             rooms[roomName].players[nextIndex]?.disconnected) && 
-            loops < rooms[roomName].players.length
-          ) {
-            nextIndex = (nextIndex + 1) % rooms[roomName].players.length;
-            loops++;
+          // Delete room if empty
+          if (rooms[roomName].players.length === 0) {
+            delete rooms[roomName];
+            console.log(`🗑️ Room "${roomName}" deleted - no players left`);
           }
+        } else {
+          // 2. In-game: Mark player as disconnected instead of removing them
+          disconnectedPlayer.disconnected = true;
+          disconnectedPlayer.disconnectedAt = Date.now(); // Set timestamp for grace period
+          disconnectedPlayer.socketId = ""; // Clear socketId
           
-          // Set next player as active if found
-          const nextPlayer = rooms[roomName].players[nextIndex];
-          if (nextPlayer && !nextPlayer.surrendered && !nextPlayer.bankrupt && !nextPlayer.disconnected) {
-            nextPlayer.isActive = true;
-            io.to(roomName).emit("next-turn", {
-              nextPlayerUid: nextPlayer.uid,
-              nextPlayerIndex: nextIndex,
-            });
+          // If it was their turn, pass to next player
+          if (disconnectedPlayer.isActive && rooms[roomName].status === "in-game") {
+            disconnectedPlayer.isActive = false;
+            
+            // Find next non-surrendered/non-bankrupt/non-disconnected player
+            const currentIndex = rooms[roomName].players.findIndex((p) => p.uid === disconnectedPlayer.uid);
+            let nextIndex = (currentIndex + 1) % rooms[roomName].players.length;
+            let loops = 0;
+            while (
+              (rooms[roomName].players[nextIndex]?.surrendered || 
+               rooms[roomName].players[nextIndex]?.bankrupt ||
+               rooms[roomName].players[nextIndex]?.disconnected) && 
+              loops < rooms[roomName].players.length
+            ) {
+              nextIndex = (nextIndex + 1) % rooms[roomName].players.length;
+              loops++;
+            }
+            
+            // Set next player as active if found
+            const nextPlayer = rooms[roomName].players[nextIndex];
+            if (nextPlayer && !nextPlayer.surrendered && !nextPlayer.bankrupt && !nextPlayer.disconnected) {
+              nextPlayer.isActive = true;
+              io.to(roomName).emit("next-turn", {
+                nextPlayerUid: nextPlayer.uid,
+                nextPlayerIndex: nextIndex,
+              });
+            }
           }
-        }
 
-        // 3. Emit the specific 'player-disconnected' event with the UID
-        io.to(roomName).emit("player-disconnected", { 
-          uid: disconnectedPlayer.uid,
-          name: disconnectedPlayer.name,
-          message: `${disconnectedPlayer.name} has disconnected. They can reconnect to resume.`,
-        });
-        console.log(`🔌 Player ${disconnectedPlayer.name} (${disconnectedPlayer.uid}) marked as disconnected in ${roomName}`);
-        
-        // 4. Check if game should end (all remaining active players disconnected or eliminated)
-        if (rooms[roomName].status === "in-game") {
+          // 3. Emit the specific 'player-disconnected' event with the UID
+          io.to(roomName).emit("player-disconnected", { 
+            uid: disconnectedPlayer.uid,
+            name: disconnectedPlayer.name,
+            message: `${disconnectedPlayer.name} has disconnected. They have a short time to reconnect before being surrendered.`,
+            disconnectedAt: disconnectedPlayer.disconnectedAt
+          });
+          console.log(`🔌 Player ${disconnectedPlayer.name} (${disconnectedPlayer.uid}) marked as disconnected in ${roomName}`);
+          
+          // 4. Check if game should end (all remaining active players disconnected or eliminated)
           const activePlayers = rooms[roomName].players.filter(
             p => !p.surrendered && !p.bankrupt && !p.disconnected
           );
           if (activePlayers.length === 1 && rooms[roomName].minDurationMet) {
-            console.log(`🏆 Game ending in ${roomName} (all others disconnected)`);
+            console.log(`🏆 Game ending in ${roomName} (all others disconnected/eliminated)`);
             endGame(roomName, activePlayers[0], "last-standing");
           }
         }
@@ -2958,40 +2975,67 @@ setInterval(() => {
     if (room.status === "in-game") {
       const activePlayer = room.players.find(p => p.isActive);
       
-      // Turn Timeout Logic (30 seconds)
-      if (activePlayer && !activePlayer.isBot && !activePlayer.disconnected && !activePlayer.bankrupt && !activePlayer.surrendered) {
-        const turnDuration = Date.now() - (room.lastTurnTimestamp || Date.now());
-        if (turnDuration > 30000) { // 30 seconds timeout
-            console.log(`⏱️ Turn timeout for ${activePlayer.name} in ${roomName}`);
-            activePlayer.missedTurns = (activePlayer.missedTurns || 0) + 1;
+      // 1. Handle Grace Period for ALL Disconnected Players (regardless of whose turn it is)
+      const GRACE_PERIOD_MS = 60000; // 60 seconds
+      room.players.forEach(p => {
+        if (p.disconnected && p.disconnectedAt && !p.surrendered && !p.bankrupt) {
+          const timeSinceDisconnect = Date.now() - p.disconnectedAt;
+          if (timeSinceDisconnect > GRACE_PERIOD_MS) {
+            console.log(`⏰ Grace period expired for ${p.name} in ${roomName}. Auto-surrendering.`);
+            p.surrendered = true;
+            p.bankrupt = true;
+            p.money = 0;
+            if (p.isActive) p.isActive = false;
             
-            if (activePlayer.missedTurns >= 2) {
-              console.log(`💀 Player ${activePlayer.name} missed 2 turns. Auto-eliminating.`);
-              activePlayer.bankrupt = true;
-              activePlayer.surrendered = true;
-              activePlayer.money = 0;
-              activePlayer.isActive = false;
+            returnAssetsToBank(roomName, p);
+            
+            io.to(roomName).emit("player-surrendered", {
+                uid: p.uid,
+                name: p.name,
+                message: `${p.name} was auto-surrendered after failing to reconnect within 60 seconds.`,
+            });
+            
+            const winCheck = checkWinCondition(roomName);
+            if (winCheck.hasWinner && winCheck.winner) {
+                endGame(roomName, winCheck.winner, "last-standing");
+            }
+          }
+        }
+      });
+
+      // 2. Turn Timeout/Auto-pass Logic
+      if (activePlayer && !activePlayer.isBot && !activePlayer.bankrupt && !activePlayer.surrendered) {
+        const turnDuration = Date.now() - (room.lastTurnTimestamp || Date.now());
+        
+        // If player is disconnected, wait a shorter time (10s) before passing turn
+        const timeoutLimit = activePlayer.disconnected ? 10000 : 30000; 
+
+        if (turnDuration > timeoutLimit) {
+            console.log(`⏱️ Turn timeout for ${activePlayer.name} ${activePlayer.disconnected ? '(disconnected)' : ''} in ${roomName}`);
+            
+            // Increment missed turns only if NOT disconnected (disconnected handled by grace period)
+            if (!activePlayer.disconnected) {
+              activePlayer.missedTurns = (activePlayer.missedTurns || 0) + 1;
               
-              // Return all properties and cards to bank
-              returnAssetsToBank(roomName, activePlayer);
-              
-              // Emit surrender event to trigger UI removal/updates
-              io.to(roomName).emit("player-surrendered", {
-                  uid: activePlayer.uid,
-                  name: activePlayer.name,
-                  message: `${activePlayer.name} has been eliminated for being inactive (missed 2 turns).`,
-              });
-              
-              // Emit bankrupt event for consistency
-              io.to(roomName).emit("player-bankrupt", {
-                  uid: activePlayer.uid,
-                  name: activePlayer.name,
-                  reason: "AFK (2 missed turns)",
-              });
-              
-              const winCheck = checkWinCondition(roomName);
-              if (winCheck.hasWinner && winCheck.winner) {
-                  endGame(roomName, winCheck.winner, "last-standing");
+              if (activePlayer.missedTurns >= 2) {
+                console.log(`💀 Player ${activePlayer.name} missed 2 turns. Auto-eliminating.`);
+                activePlayer.bankrupt = true;
+                activePlayer.surrendered = true;
+                activePlayer.money = 0;
+                activePlayer.isActive = false;
+                
+                returnAssetsToBank(roomName, activePlayer);
+                
+                io.to(roomName).emit("player-surrendered", {
+                    uid: activePlayer.uid,
+                    name: activePlayer.name,
+                    message: `${activePlayer.name} has been eliminated for being inactive (missed 2 turns).`,
+                });
+                
+                const winCheck = checkWinCondition(roomName);
+                if (winCheck.hasWinner && winCheck.winner) {
+                    endGame(roomName, winCheck.winner, "last-standing");
+                }
               }
             }
             
