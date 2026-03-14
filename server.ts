@@ -228,7 +228,7 @@ const emitRoomsToSocket = (socket: any) => {
 
 
 import { calculateRent, checkWinCondition, hasColorMonopoly, nearestCell, nearestUtility, railroads, utilities, findPropertyOwner, endGame, startGameTimer } from './src/services/gameLogic.js';
-import { registerTradeHandlers } from './src/handlers/controllers/tradeController.js';
+import { registerTradeHandlers } from './src/controllers/tradeController.js';
 
 const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
   1: (p, room) => {
