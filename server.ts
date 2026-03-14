@@ -32,7 +32,8 @@ const app = express();
 const NODE_ENV = process.env.NODE_ENV || "development";
 const isProdLike = NODE_ENV === 'production' || 
                    process.env.CLIENT_API_URL?.includes('myanmarpoly') || 
-                   process.env.CLIENT_API_URL?.includes('khaingkyawmin');
+                   process.env.CLIENT_API_URL?.includes('khaingkyawmin') ||
+                   process.env.CLIENT_API_URL?.includes('vercel.app');
 
 const DEFAULT_API_URL = isProdLike
   ? (process.env.CLIENT_API_URL || "https://myanmarpoly.online")
@@ -89,6 +90,7 @@ const voiceMessageChunks: Record<string, { chunks: Buffer[]; timestamp: number }
 // Configure CORS with dynamic origin matching for credentials support
 const allowedOrigins = [
   "https://monopoly-project-phi.vercel.app",
+  "https://monopoly-project-git-main-kkm1991s-projects.vercel.app",
   "https://www.myanmarpoly.online",
   "https://myanmarpoly.online",
   "https://khaingkyawmin.com",
@@ -205,7 +207,7 @@ const emitRooms = () => {
       players: deduplicatePlayers(room.players),
     };
   }
-  io.emit("update-rooms", deduplicatedRooms);
+  io.emit("update-rooms", { rooms: deduplicatedRooms, serverTime: Date.now() });
 };
 
 // Helper to emit rooms to a specific socket
@@ -217,7 +219,7 @@ const emitRoomsToSocket = (socket: any) => {
       players: deduplicatePlayers(room.players),
     };
   }
-  socket.emit("update-rooms", deduplicatedRooms);
+  socket.emit("update-rooms", { rooms: deduplicatedRooms, serverTime: Date.now() });
 };
 
 // Removed local declarations of state variables already imported from gameState.js above
@@ -226,7 +228,7 @@ const emitRoomsToSocket = (socket: any) => {
 
 
 import { calculateRent, checkWinCondition, hasColorMonopoly, nearestCell, nearestUtility, railroads, utilities, findPropertyOwner, endGame, startGameTimer } from './src/services/gameLogic.js';
-import { registerTradeHandlers } from './src/controllers/tradeController.js';
+import { registerTradeHandlers } from './src/handlers/controllers/tradeController.js';
 
 const chanceEffects: Record<number, (player: Player, room: Room) => void> = {
   1: (p, room) => {
@@ -957,6 +959,7 @@ io.on("connection", (socket) => {
           nextPlayerIndex: nextIndex,
           lastTurnTimestamp: room.lastTurnTimestamp,
           turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+          serverTime: Date.now(),
         });
       }
       
@@ -1030,8 +1033,9 @@ io.on("connection", (socket) => {
         io.to(roomName).emit("next-turn", {
           nextPlayerUid: room.players[nextIndex].uid,
           nextPlayerIndex: nextIndex,
-          lastTurnTimestamp: room.lastTurnTimestamp,
+          lastTurnTimestamp: room.lastTurnTimestamp || Date.now(),
           turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+          serverTime: Date.now(),
         });
       }
       
@@ -1137,6 +1141,7 @@ socket.on("pay-debt", ({ roomName, uid, ownerUid, amount, propertyIndex }) => {
       nextPlayerIndex: nextIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     emitRooms();
@@ -1197,6 +1202,7 @@ socket.on("declare-bankruptcy", ({ roomName, uid, ownerUid, debtAmount }) => {
       nextPlayerIndex: nextIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     emitRooms();
@@ -1339,6 +1345,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       nextPlayerIndex: startingIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[startingIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     io.to(roomName).emit("update-rooms", rooms);
@@ -1599,6 +1606,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       nextPlayerIndex: nextPlayerIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextPlayerIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     // last move Result
@@ -1700,6 +1708,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       nextPlayerIndex: nextIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
     
     io.to(roomName).emit("update-rooms", rooms);
@@ -1788,6 +1797,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       nextPlayerIndex: nextIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     io.to(roomName).emit("move-result", {
@@ -2191,6 +2201,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       nextPlayerIndex: nextIndex,
       lastTurnTimestamp: room.lastTurnTimestamp,
       turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     io.to(roomName).emit("update-rooms", rooms);
@@ -2639,6 +2650,7 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
                 nextPlayerIndex: nextIndex,
                 lastTurnTimestamp: rooms[roomName].lastTurnTimestamp,
                 turnDuration: nextPlayer.disconnected ? 10 : 30,
+                serverTime: Date.now(),
               });
             }
           }
@@ -2750,6 +2762,7 @@ const passBotTurn = async (roomName: string, botUid: string) => {
     nextPlayerIndex: nextIndex,
     lastTurnTimestamp: room.lastTurnTimestamp,
     turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+    serverTime: Date.now(),
   });
   
   io.to(roomName).emit("update-rooms", rooms);
@@ -3088,6 +3101,7 @@ setInterval(() => {
                 nextPlayerIndex: nextIndex,
                 lastTurnTimestamp: room.lastTurnTimestamp,
                 turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+                serverTime: Date.now(),
             });
             io.to(roomName).emit("update-rooms", rooms);
         }

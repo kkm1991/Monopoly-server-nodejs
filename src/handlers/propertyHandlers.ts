@@ -67,9 +67,13 @@ export const registerPropertyHandlers = (socket: Socket) => {
       isActive: i === nextIndex,
     }));
 
+    room.lastTurnTimestamp = Date.now();
     broadcastToRoom(roomName, "next-turn", {
       nextPlayerUid: room.players[nextIndex].uid,
       nextPlayerIndex: nextIndex,
+      lastTurnTimestamp: room.lastTurnTimestamp,
+      turnDuration: room.players[nextIndex].disconnected ? 10 : 30,
+      serverTime: Date.now(),
     });
 
     broadcastToRoom(roomName, "move-result", {

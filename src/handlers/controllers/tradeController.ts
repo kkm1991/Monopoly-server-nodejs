@@ -1,6 +1,6 @@
 import { Socket } from "socket.io";
-import { rooms } from "../services/gameState.js";
-import { getIO } from "../services/socketService.js";
+import { rooms } from "../../services/gameState.js";
+import { getIO } from "../../services/socketService.js";
 
 export const registerTradeHandlers = (socket: Socket) => {
   const io = getIO();

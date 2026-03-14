@@ -12,7 +12,7 @@ services:
       - key: PORT
         value: 10000
       - key: CORS_ORIGINS
-        value: "https://monopoly-project-phi.vercel.app"
+        value: "https://monopoly-project-phi.vercel.app,https://monopoly-project-git-main-kkm1991s-projects.vercel.app"
     autoDeploy: true
 
 # Optional: Add a database if needed in the future
