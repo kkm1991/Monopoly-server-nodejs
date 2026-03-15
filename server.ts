@@ -49,7 +49,7 @@ app.get("/api/rankings", async (req, res) => {
   try {
     const response = await fetch(`${CLIENT_API_URL}/api/rankings`, {
       headers: {
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       }
     });
     if (!response.ok) throw new Error("Failed to fetch from client API");
@@ -67,7 +67,7 @@ app.get("/api/player/:uid/stats", async (req, res) => {
   try {
     const response = await fetch(`${CLIENT_API_URL}/api/rankings`, {
       headers: {
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       }
     });
     if (!response.ok) throw new Error("Failed to fetch from client API");
@@ -187,6 +187,9 @@ import { Player, CardOffer, Room } from './src/types/index.js';
 
 // In-memory rooms
 import { rooms, gameTimers, propertyBuildings, activeAuctions, pendingPurchases, animatingPlayers, turnCooldowns } from './src/services/gameState.js';
+
+// Online user tracking for friends system: userId -> socketId
+const onlineUsers = new Map<string, string>();
 
 // Helper to deduplicate players in a room by uid
 const deduplicatePlayers = <T extends { uid: string }>(players: T[]): T[] => {
@@ -1243,9 +1246,32 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       return;
     }
 
-    // Apply game rules if provided
+    // Apply game rules if provided (with server-side validation)
     if (gameRules) {
-      room.gameRules = gameRules;
+      // Sanitize gameRules to prevent exploits (e.g., negative coinsCost)
+      const MAX_TIME_LIMIT = 120; // max minutes
+
+      const sanitizedRules: any = {};
+      
+      if (gameRules.coinsCost !== undefined) {
+        const cost = Number(gameRules.coinsCost);
+        // Must be a non-negative integer within allowed range (0-1000)
+        sanitizedRules.coinsCost = (Number.isInteger(cost) && cost >= 0 && cost <= 1000) ? cost : 0;
+      }
+      if (gameRules.startingMoney !== undefined) {
+        const money = Number(gameRules.startingMoney);
+        // Must be a positive integer within allowed range (500-5000)
+        sanitizedRules.startingMoney = (Number.isInteger(money) && money >= 500 && money <= 5000) ? money : 1500;
+      }
+      if (gameRules.timeLimit !== undefined) {
+        const time = Number(gameRules.timeLimit);
+        sanitizedRules.timeLimit = (Number.isInteger(time) && time > 0 && time <= MAX_TIME_LIMIT) ? time : 30;
+      }
+      // Pass through non-sensitive boolean rules as-is
+      if (typeof gameRules.auctionEnabled === 'boolean') sanitizedRules.auctionEnabled = gameRules.auctionEnabled;
+      if (typeof gameRules.doubleRentOnMonopoly === 'boolean') sanitizedRules.doubleRentOnMonopoly = gameRules.doubleRentOnMonopoly;
+
+      room.gameRules = sanitizedRules;
     }
 
     const coinsCost = room.gameRules?.coinsCost ?? 0;
@@ -1740,11 +1766,19 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       return;
     }
 
+    // Server-authoritative price: use propertyRentData instead of client-sent price
+    const propertyData = propertyRentData[propertyIndex];
+    if (!propertyData) {
+      socket.emit("error", "Invalid property");
+      return;
+    }
+    const serverPrice = propertyData.originalPrice;
+
     const player = room.players.find((p) => p.uid === uid);
     if (!player) return;
 
-    // Check if player has enough money
-    if (player.money < price) {
+    // Check if player has enough money (using server-authoritative price)
+    if (player.money < serverPrice) {
       socket.emit("error", "Not enough money");
       return;
     }
@@ -1753,10 +1787,10 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     pendingPurchases[roomName].add(propertyIndex);
 
     // Deduct money and add property to inventory
-    player.money -= price;
+    player.money -= serverPrice;
     player.inventory.properties.push(propertyIndex);
 
-    console.log(`✅ Player ${player.name} bought property ${propertyIndex} for $${price}`);
+    console.log(`✅ Player ${player.name} bought property ${propertyIndex} for $${serverPrice}`);
     console.log(`📦 Player inventory now:`, player.inventory);
 
     // Remove from pending purchases after successful purchase
@@ -1766,7 +1800,7 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
     io.to(roomName).emit("property-bought", {
       uid,
       propertyIndex,
-      price,
+      price: serverPrice,
     });
 
     // Update room state - include full room data with inventory
@@ -2595,8 +2629,72 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     socket.emit("admin-state", state);
   });
 
+  // ================= Friends System (Real-time) =================
+  
+  // Register user as online
+  socket.on("friend-register", ({ userId }) => {
+    if (!userId) return;
+    onlineUsers.set(userId, socket.id);
+    console.log(`👤 User ${userId} registered online (socket: ${socket.id})`);
+  });
+
+  // Get online status of specific user IDs
+  socket.on("friend-get-online", ({ userIds }, callback) => {
+    if (!Array.isArray(userIds)) return;
+    const statuses: Record<string, boolean> = {};
+    for (const uid of userIds) {
+      statuses[uid] = onlineUsers.has(uid);
+    }
+    if (typeof callback === 'function') callback(statuses);
+  });
+
+  // Relay a chat message to a friend in real-time
+  socket.on("friend-send-message", ({ toUserId, message }) => {
+    if (!toUserId || !message) return;
+    const targetSocketId = onlineUsers.get(toUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("friend-new-message", message);
+    }
+  });
+
+  // Notify friend of a new friend request
+  socket.on("friend-send-request", ({ toUserId, fromUsername }) => {
+    if (!toUserId) return;
+    const targetSocketId = onlineUsers.get(toUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("friend-request-received", { fromUsername });
+    }
+  });
+
+  // Notify friend that request was accepted
+  socket.on("friend-accept-notify", ({ toUserId, fromUsername }) => {
+    if (!toUserId) return;
+    const targetSocketId = onlineUsers.get(toUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("friend-request-accepted", { fromUsername });
+    }
+  });
+
+  // Notify friend of a gift received
+  socket.on("friend-send-gift-notify", ({ toUserId, fromUsername, giftType, giftAmount }) => {
+    if (!toUserId) return;
+    const targetSocketId = onlineUsers.get(toUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("friend-gift-received", { fromUsername, giftType, giftAmount });
+    }
+  });
+
   // Handle disconnect
   socket.on("disconnect", () => {
+    // Remove from online users tracking
+    for (const [userId, socketId] of onlineUsers.entries()) {
+      if (socketId === socket.id) {
+        onlineUsers.delete(userId);
+        console.log(`👤 User ${userId} went offline`);
+        break;
+      }
+    }
+    
     console.log("❌ Client disconnected", socket.id);
 
     for (const roomName in rooms) {

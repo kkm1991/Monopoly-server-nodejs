@@ -45,7 +45,7 @@ export const updatePlayerStats = async (winner: any, players: any[], gameId?: st
       method: "POST",
       headers: { 
         "Content-Type": "application/json",
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       },
       body: JSON.stringify({ winner, players, gameId }),
     });
@@ -70,7 +70,7 @@ export const fetchPlayerWins = async (uid: string): Promise<number> => {
     console.log(`📡 Fetching wins from: ${url}`);
     const response = await fetch(url, {
       headers: {
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       }
     });
     if (!response.ok) {
@@ -91,7 +91,7 @@ export const getPlayerCoins = async (uid: string): Promise<number> => {
   try {
     const response = await fetch(url, {
       headers: {
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       }
     });
     if (!response.ok) return 0;
@@ -129,7 +129,7 @@ export const fetchPlayerEconomy = async (uid: string) => {
     console.log(`📡 Fetching economy from: ${url}`);
     const response = await fetch(url, {
       headers: {
-        "x-api-key": process.env.SERVER_API_KEY || "myanmarpoly-secret-key-2026"
+        "x-api-key": process.env.SERVER_API_KEY || ""
       }
     });
     if (!response.ok) {
