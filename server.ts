@@ -188,8 +188,8 @@ import { Player, CardOffer, Room } from './src/types/index.js';
 // In-memory rooms
 import { rooms, gameTimers, propertyBuildings, activeAuctions, pendingPurchases, animatingPlayers, turnCooldowns } from './src/services/gameState.js';
 
-// Online user tracking for friends system: userId -> socketId
-const onlineUsers = new Map<string, string>();
+// Online user tracking for friends system: userId -> { socketId, friendIds }
+const onlineUsers = new Map<string, { socketId: string; friendIds: string[] }>();
 
 // Helper to deduplicate players in a room by uid
 const deduplicatePlayers = <T extends { uid: string }>(players: T[]): T[] => {
@@ -2629,16 +2629,41 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     socket.emit("admin-state", state);
   });
 
-  // ================= Friends System (Real-time) =================
+  // ================= Friends System (Real-time, Push Model) =================
   
-  // Register user as online
-  socket.on("friend-register", ({ userId }) => {
+  // Register user as online + notify their friends
+  socket.on("friend-register", ({ userId, friendIds }) => {
     if (!userId) return;
-    onlineUsers.set(userId, socket.id);
-    console.log(`👤 User ${userId} registered online (socket: ${socket.id})`);
+    const safeFriendIds = Array.isArray(friendIds) ? friendIds : [];
+    onlineUsers.set(userId, { socketId: socket.id, friendIds: safeFriendIds });
+    console.log(`👤 User ${userId} registered online (socket: ${socket.id}, friends: ${safeFriendIds.length})`);
+
+    // Notify this user's friends that they came online
+    for (const fid of safeFriendIds) {
+      const friendData = onlineUsers.get(fid);
+      if (friendData) {
+        io.to(friendData.socketId).emit("friend-status-changed", { userId, online: true });
+      }
+    }
+
+    // Tell this user which of their friends are already online
+    const onlineStatuses: Record<string, boolean> = {};
+    for (const fid of safeFriendIds) {
+      onlineStatuses[fid] = onlineUsers.has(fid);
+    }
+    socket.emit("friend-online-bulk", onlineStatuses);
   });
 
-  // Get online status of specific user IDs
+  // Update friend list (e.g., after accepting a new friend)
+  socket.on("friend-update-list", ({ userId, friendIds }) => {
+    if (!userId) return;
+    const existing = onlineUsers.get(userId);
+    if (existing) {
+      existing.friendIds = Array.isArray(friendIds) ? friendIds : [];
+    }
+  });
+
+  // Get online status of specific user IDs (kept as fallback)
   socket.on("friend-get-online", ({ userIds }, callback) => {
     if (!Array.isArray(userIds)) return;
     const statuses: Record<string, boolean> = {};
@@ -2648,47 +2673,56 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     if (typeof callback === 'function') callback(statuses);
   });
 
-  // Relay a chat message to a friend in real-time
-  socket.on("friend-send-message", ({ toUserId, message }) => {
+  // Relay a chat message to a friend in real-time + push unread delta
+  socket.on("friend-send-message", ({ toUserId, message, fromUserId }) => {
     if (!toUserId || !message) return;
-    const targetSocketId = onlineUsers.get(toUserId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("friend-new-message", message);
+    const targetData = onlineUsers.get(toUserId);
+    if (targetData) {
+      io.to(targetData.socketId).emit("friend-new-message", message);
+      // Push unread count increment (so client doesn't need to fetch)
+      io.to(targetData.socketId).emit("friend-unread-update", { fromUserId, delta: 1 });
     }
   });
 
   // Notify friend of a new friend request
   socket.on("friend-send-request", ({ toUserId, fromUsername }) => {
     if (!toUserId) return;
-    const targetSocketId = onlineUsers.get(toUserId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("friend-request-received", { fromUsername });
+    const targetData = onlineUsers.get(toUserId);
+    if (targetData) {
+      io.to(targetData.socketId).emit("friend-request-received", { fromUsername });
     }
   });
 
   // Notify friend that request was accepted
   socket.on("friend-accept-notify", ({ toUserId, fromUsername }) => {
     if (!toUserId) return;
-    const targetSocketId = onlineUsers.get(toUserId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("friend-request-accepted", { fromUsername });
+    const targetData = onlineUsers.get(toUserId);
+    if (targetData) {
+      io.to(targetData.socketId).emit("friend-request-accepted", { fromUsername });
     }
   });
 
   // Notify friend of a gift received
   socket.on("friend-send-gift-notify", ({ toUserId, fromUsername, giftType, giftAmount }) => {
     if (!toUserId) return;
-    const targetSocketId = onlineUsers.get(toUserId);
-    if (targetSocketId) {
-      io.to(targetSocketId).emit("friend-gift-received", { fromUsername, giftType, giftAmount });
+    const targetData = onlineUsers.get(toUserId);
+    if (targetData) {
+      io.to(targetData.socketId).emit("friend-gift-received", { fromUsername, giftType, giftAmount });
     }
   });
 
   // Handle disconnect
   socket.on("disconnect", () => {
-    // Remove from online users tracking
-    for (const [userId, socketId] of onlineUsers.entries()) {
-      if (socketId === socket.id) {
+    // Remove from online users + notify friends they went offline
+    for (const [userId, userData] of onlineUsers.entries()) {
+      if (userData.socketId === socket.id) {
+        // Notify this user's friends
+        for (const fid of userData.friendIds) {
+          const friendData = onlineUsers.get(fid);
+          if (friendData) {
+            io.to(friendData.socketId).emit("friend-status-changed", { userId, online: false });
+          }
+        }
         onlineUsers.delete(userId);
         console.log(`👤 User ${userId} went offline`);
         break;
