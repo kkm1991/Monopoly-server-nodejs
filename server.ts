@@ -1270,6 +1270,8 @@ socket.on("jail-card-decision", ({ roomName, uid, useCard }) => {
       // Pass through non-sensitive boolean rules as-is
       if (typeof gameRules.auctionEnabled === 'boolean') sanitizedRules.auctionEnabled = gameRules.auctionEnabled;
       if (typeof gameRules.doubleRentOnMonopoly === 'boolean') sanitizedRules.doubleRentOnMonopoly = gameRules.doubleRentOnMonopoly;
+      // Ranked flag: defaults to true if not provided
+      sanitizedRules.ranked = typeof gameRules.ranked === 'boolean' ? gameRules.ranked : true;
 
       room.gameRules = sanitizedRules;
     }
@@ -2708,6 +2710,23 @@ socket.on("voice-message-chunk", ({ messageId, chunk, isLast }: any) => {
     const targetData = onlineUsers.get(toUserId);
     if (targetData) {
       io.to(targetData.socketId).emit("friend-gift-received", { fromUsername, giftType, giftAmount });
+    }
+  });
+
+  // Admin push notification to online user(s)
+  socket.on("admin-push-notification", ({ targetUserId, notification }) => {
+    if (!notification) return;
+    if (targetUserId) {
+      // Send to specific user
+      const targetData = onlineUsers.get(targetUserId);
+      if (targetData) {
+        io.to(targetData.socketId).emit("new-notification", notification);
+      }
+    } else {
+      // Broadcast to all online users
+      for (const [, userData] of onlineUsers.entries()) {
+        io.to(userData.socketId).emit("new-notification", notification);
+      }
     }
   });
 

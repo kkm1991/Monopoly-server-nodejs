@@ -46,6 +46,7 @@ export type Room = {
     startingMoney: number;
     coinsCost: number;
     winPrizeMultiplier: number;
+    ranked?: boolean;
   };
   players: Player[];
   maxPlayers: number;

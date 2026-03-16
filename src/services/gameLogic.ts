@@ -153,27 +153,34 @@ export const endGame = async (roomName: string, winner: Player, reason: "last-st
     totalPlayers: room.originalPlayerCount || room.players.length,
     players: playerData,
     endedAt: now,
+    ranked: room.gameRules?.ranked !== false,
   });
 
-  console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (${reason})`);
+  console.log(`\ud83c\udfc6 Game ended in ${roomName}! Winner: ${winner.name} (${reason}) | Ranked: ${room.gameRules?.ranked !== false}`);
   console.log(`\u23f1\ufe0f Game duration: ${gameDurationSeconds}s | Min duration met: ${room.minDurationMet || false}`);
 
+  const isRanked = room.gameRules?.ranked !== false; // defaults to true
+
   if (room.minDurationMet) {
-    // Standardize gameId generation to be more stable
-    const gameId = `${roomName}_${room.gameStartTime || Date.now()}`;
-    console.log(`📊 Updating stats for game: ${gameId}`);
-    
-    await updatePlayerStats(
-      { uid: winner.uid, name: winner.name },
-      room.players.map(p => ({ 
-        uid: p.uid, 
-        name: p.name, 
-        money: p.money, 
-        surrendered: p.surrendered,
-        isBot: p.isBot
-      })),
-      gameId
-    );
+    // Only update rankings if this is a ranked game
+    if (isRanked) {
+      const gameId = `${roomName}_${room.gameStartTime || Date.now()}`;
+      console.log(`📊 Updating stats for game: ${gameId}`);
+      
+      await updatePlayerStats(
+        { uid: winner.uid, name: winner.name },
+        room.players.map(p => ({ 
+          uid: p.uid, 
+          name: p.name, 
+          money: p.money, 
+          surrendered: p.surrendered,
+          isBot: p.isBot
+        })),
+        gameId
+      );
+    } else {
+      console.log(`🎮 Unranked game in ${roomName} — skipping ranking update`);
+    }
 
     const coinsCost = room.gameRules?.coinsCost ?? 50;
     const { winnerReward } = await rewardPlayers(winner.uid, room.players, coinsCost, room.originalPlayerCount);
